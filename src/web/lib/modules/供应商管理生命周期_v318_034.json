@@ -1,0 +1,11 @@
+{
+  "id": "p1773765251911",
+  "name": "供应商管理生命周期",
+  "code": "graph TD\n    %% Main Path: Supplier Admission\n    %% Branch Paths: Service Management, Catalog Management, Info Changes\n\n    subgraph SG_SUP [\"供应商 (Supplier)\"]\n        S1[\"1.1 供应商注册/信息填报\"]\n        S2[\"服务\"]\n        S3[\"准入\"]\n        S4[\"信息变更\"]\n    end\n\n    subgraph SG_ADM [\"供应商管理员 (Admin)\"]\n        A1[\"2.1 准入预审 (注册审核)\"]\n        A2[\"2.2 准入方案制定/审核\"]\n        A3[\"2.3 准入评审汇总/结果维护\"]\n        A4[\"非采购类供应商录入\"]\n        A5[\"战略供应商管理/申请\"]\n        A6[\"黑名单申请发起\"]\n        A7[\"临时增项/变更申请\"]\n    end\n\n    subgraph SG_EXP [\"评审专家 (Expert)\"]\n        E1[\"3.1 准入评价/打分\"]\n    end\n\n    subgraph SG_APR [\"审核人员 (Approver)\"]\n        R1[\"4.1 核心流程审批 (录入/撤销)\"]\n        R2[\"4.2 服务关系/目录审核\"]\n        R3[\"4.3 黑名单/变更审核\"]\n    end\n\n    subgraph SG_ARC [\"档案 (Archives)\"]\n        ARC1[\"供应商动态档案查询/更新\"]\n    end\n\n    %% Main Path Connections\n    S1 --> A1\n    A1 --> A2\n    A2 --> E1\n    E1 --> A3\n    A3 --> R1\n    R1 --> ARC1\n\n    %% Branch: Service & Catalog\n    S2 --> R2\n    S3 --> R2\n    R2 --> ARC1\n\n    %% Branch: Blacklist & Entry\n    A4 --> R1\n    A5 --> R1\n    A6 --> R3\n    R3 --> ARC1\n\n    %% Branch: Changes\n    S4 --> R3\n    A7 --> R3",
+  "mappings": {},
+  "remarks": {},
+  "dataSources": {},
+  "outputs": {},
+  "downstream": {},
+  "version": "v318_034"
+}

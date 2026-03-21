@@ -1,0 +1,29 @@
+/.gitattributes text eol=lf
+/.gitignore    text eol=lf
+* text=auto
+
+*.go   text eol=lf
+*.mod  text eol=lf
+*.sum  text eol=lf
+*.html text eol=lf
+*.css  text eol=lf
+*.js   text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+*.bat  text eol=crlf
+
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.svg  text eol=lf
+*.ttf  binary
+*.woff binary
+*.woff2 binary
+*.zip  binary
+*.tar  binary
+*.gz   binary
