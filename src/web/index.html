@@ -217,7 +217,109 @@
             opacity: 1;
         }
 
-        /* Center: Workspace */
+                .folder-group {
+            margin-bottom: 6px;
+        }
+
+        .folder-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 0.65rem 0.75rem;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.2s ease;
+            color: var(--text-main);
+        }
+
+        .folder-header:hover {
+            background: #eef0f2;
+        }
+
+        .folder-header-main {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+            flex: 1;
+        }
+
+        .folder-toggle {
+            color: var(--text-secondary);
+            transition: transform 0.2s ease;
+            flex-shrink: 0;
+        }
+
+        .folder-header.collapsed .folder-toggle {
+            transform: rotate(-90deg);
+        }
+
+        .folder-name {
+            font-size: 0.875rem;
+            font-weight: 600;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .folder-count {
+            flex-shrink: 0;
+            font-size: 10px;
+            padding: 1px 6px;
+            border-radius: 999px;
+            background: #e5e6eb;
+            color: var(--text-secondary);
+        }
+
+        .folder-actions {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            opacity: 0;
+            transition: opacity 0.2s ease;
+        }
+
+        .folder-header:hover .folder-actions {
+            opacity: 1;
+        }
+
+        .folder-action-btn {
+            width: 22px;
+            height: 22px;
+            border: none;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text-secondary);
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.15s ease, color 0.15s ease;
+        }
+
+        .folder-action-btn:hover {
+            background: rgba(0, 82, 217, 0.08);
+            color: var(--primary);
+        }
+
+        .folder-action-btn.delete:hover {
+            background: rgba(255, 77, 79, 0.08);
+            color: #ff4d4f;
+        }
+
+        .folder-children {
+            margin: 4px 0 0 12px;
+            padding-left: 12px;
+            border-left: 1px dashed #d9dde5;
+        }
+
+        .folder-empty {
+            padding: 8px 10px;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+/* Center: Workspace */
         .canvas {
             flex: 1;
             background: white;
@@ -837,6 +939,14 @@
                                 <path d="M12 11v6M9 14h6" />
                             </svg>
                         </button>
+                        <button class="btn btn-ghost" onclick="addNewFolder()" title="新增文件夹"
+                            style="padding: 0 4px; color: #fa8c16;">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                                <path d="M12 11v6M9 14h6" />
+                            </svg>
+                        </button>
                         <button class="btn btn-ghost" onclick="addNewProject()" title="新增业务模块"
                             style="padding: 0 4px; color: var(--primary);">
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1170,6 +1280,7 @@
         /* STATE_START */
         let state = {
             projects: [DEFAULT_TEMPLATE],
+            folders: [],
             activeProjectId: 'tpl_supplier_lifecycle'
         };
         /* STATE_END */
@@ -1626,54 +1737,203 @@
 
 
         function refreshApp(skipFit = false) {
+            syncFolderStateFromProjects();
             applyModeUI();
             renderStatusGuide();
             renderProjectList();
             loadActiveProject(skipFit);
         }
 
+        function compareFolderPath(left, right) {
+            return left.localeCompare(right, 'zh-CN', { sensitivity: 'base', numeric: true });
+        }
 
+        function normalizeFolderPath(value) {
+            if (typeof value !== 'string') return '';
+            const segments = value
+                .replace(/\\/g, '/')
+                .split('/')
+                .map(part => part.trim())
+                .filter(Boolean);
+            if (segments.length === 0) return '';
+            if (segments.some(part => part === '.' || part === '..')) return '';
+            return segments.join('/');
+        }
+
+        function getProjectFolder(project) {
+            return normalizeFolderPath(project && project._folder ? project._folder : '');
+        }
+
+        function normalizeFolderList(folders = []) {
+            const unique = new Set();
+            folders.forEach(folder => {
+                const normalized = normalizeFolderPath(folder);
+                if (normalized) unique.add(normalized);
+            });
+            return Array.from(unique).sort(compareFolderPath);
+        }
+
+        function syncFolderStateFromProjects() {
+            const unique = new Set(normalizeFolderList(Array.isArray(state.folders) ? state.folders : []));
+            state.projects.forEach(project => {
+                const folder = getProjectFolder(project);
+                if (folder) unique.add(folder);
+            });
+            state.folders = Array.from(unique).sort(compareFolderPath);
+        }
+
+        let collapsedFolders = new Set();
+
+        function getFolderDisplayName(folderPath) {
+            const normalized = normalizeFolderPath(folderPath);
+            if (!normalized) return '未分组';
+            const segments = normalized.split('/');
+            return segments[segments.length - 1];
+        }
+
+        function toggleFolder(folderPath) {
+            if (collapsedFolders.has(folderPath)) {
+                collapsedFolders.delete(folderPath);
+            } else {
+                collapsedFolders.add(folderPath);
+            }
+            renderProjectList();
+        }
 
         // --- Project Management ---
-        function renderProjectList() {
-            const list = document.getElementById('project-list');
-            list.innerHTML = '';
+        function createProjectListItem(project, canDelete) {
+            const item = document.createElement('div');
+            item.className = `project-item ${project.id === state.activeProjectId ? 'active' : ''}`;
+            item.title = project.name + (project.version ? ` (${project.version})` : '');
 
-            state.projects.forEach(p => {
-                if ((state.standalone || isShareMode()) && p.id !== state.activeProjectId) return;
+            const isSynced = (workspaceHandle && !state.standalone) ? '<span style="color:#52c41a; font-size:10px; flex-shrink:0;">● 已同步</span>' : '';
+            const versionTag = project.version ? `<span style="background:#f0f0f0; color:#5c5c5c; font-size:10px; padding:1px 4px; border-radius:3px; margin-left:6px; flex-shrink:0;">${project.version}</span>` : '';
+            const deleteHtml = canDelete ? '<div class="delete-btn" style="top: 12px;">✕</div>' : '';
 
-                const item = document.createElement('div');
-                item.className = `project-item ${p.id === state.activeProjectId ? 'active' : ''}`;
-                item.title = p.name + (p.version ? ` (${p.version})` : '');
-
-                const isSynced = (workspaceHandle && !state.standalone) ? '<span style="color:#52c41a; font-size:10px; flex-shrink:0;">● 已同步</span>' : '';
-                const versionTag = p.version ? `<span style="background:#f0f0f0; color:#5c5c5c; font-size:10px; padding:1px 4px; border-radius:3px; margin-left:6px; flex-shrink:0;">${p.version}</span>` : '';
-                const canDelete = state.projects.length > 1 && !state.standalone && !isShareMode();
-                const deleteHtml = canDelete ? '<div class="delete-btn" style="top: 12px;">✕</div>' : '';
-
-                item.innerHTML = `
+            item.innerHTML = `
                 <div class="project-item-content" style="padding-left: 4px;">
-                    <div class="project-item-name" style="white-space: normal; word-break: break-all; max-height: 2.8em; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;">${p.name}</div>
+                    <div class="project-item-name" style="white-space: normal; word-break: break-all; max-height: 2.8em; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;">${project.name}</div>
                     <div class="project-item-meta">
-                ${versionTag}
+                        ${versionTag}
                         ${isSynced}
                     </div>
                 </div>
                 ${deleteHtml}
             `;
 
-                if (canDelete) {
-                    const deleteBtn = item.querySelector('.delete-btn');
-                    if (deleteBtn) {
-                        deleteBtn.onclick = (event) => deleteProject(event, p.id);
-                    }
+            if (canDelete) {
+                const deleteBtn = item.querySelector('.delete-btn');
+                if (deleteBtn) {
+                    deleteBtn.onclick = (event) => deleteProject(event, project.id);
                 }
+            }
 
-                item.onclick = () => switchProject(p.id);
-                list.appendChild(item);
-            });
+            item.onclick = () => switchProject(project.id);
+            return item;
         }
 
+        function createFolderGroup(folderPath, projects, canDeleteProjects) {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'folder-group';
+
+            const header = document.createElement('div');
+            header.className = `folder-header ${collapsedFolders.has(folderPath) ? 'collapsed' : ''}`;
+            header.title = folderPath;
+            header.innerHTML = `
+                <div class="folder-header-main">
+                    <svg class="folder-toggle" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="9 18 15 12 9 6"></polyline>
+                    </svg>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:#fa8c16; flex-shrink:0;">
+                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                    </svg>
+                    <span class="folder-name">${getFolderDisplayName(folderPath)}</span>
+                    <span class="folder-count">${projects.length}</span>
+                </div>
+                <div class="folder-actions">
+                    <button class="folder-action-btn" type="button" title="在此文件夹新增业务模块">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 5v14M5 12h14"></path>
+                        </svg>
+                    </button>
+                    ${projects.length === 0 ? '<button class="folder-action-btn delete" type="button" title="删除空文件夹"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="M19 6l-1 14H6L5 6"></path></svg></button>' : ''}
+                </div>
+            `;
+            header.onclick = () => toggleFolder(folderPath);
+
+            const addButton = header.querySelector('.folder-action-btn');
+            if (addButton) {
+                addButton.onclick = async (event) => {
+                    event.stopPropagation();
+                    await addNewProject(folderPath);
+                };
+            }
+
+            const deleteButton = header.querySelector('.folder-action-btn.delete');
+            if (deleteButton) {
+                deleteButton.onclick = async (event) => {
+                    event.stopPropagation();
+                    await deleteFolder(folderPath);
+                };
+            }
+
+            wrapper.appendChild(header);
+
+            const children = document.createElement('div');
+            children.className = 'folder-children';
+            children.style.display = collapsedFolders.has(folderPath) ? 'none' : 'block';
+            if (projects.length === 0) {
+                children.innerHTML = '<div class="folder-empty">空文件夹</div>';
+            } else {
+                projects.forEach(project => {
+                    children.appendChild(createProjectListItem(project, canDeleteProjects));
+                });
+            }
+            wrapper.appendChild(children);
+            return wrapper;
+        }
+
+        function renderProjectList() {
+            syncFolderStateFromProjects();
+            const list = document.getElementById('project-list');
+            list.innerHTML = '';
+
+            const visibleProjects = state.projects.filter(project => {
+                if ((state.standalone || isShareMode()) && project.id !== state.activeProjectId) return false;
+                return true;
+            });
+            const canDeleteProjects = state.projects.length > 1 && !state.standalone && !isShareMode();
+
+            if (state.standalone || isShareMode()) {
+                visibleProjects.forEach(project => {
+                    list.appendChild(createProjectListItem(project, canDeleteProjects));
+                });
+                return;
+            }
+
+            const rootProjects = [];
+            const folderProjects = new Map();
+            visibleProjects.forEach(project => {
+                const folder = getProjectFolder(project);
+                if (!folder) {
+                    rootProjects.push(project);
+                    return;
+                }
+                if (!folderProjects.has(folder)) {
+                    folderProjects.set(folder, []);
+                }
+                folderProjects.get(folder).push(project);
+            });
+
+            rootProjects.forEach(project => {
+                list.appendChild(createProjectListItem(project, canDeleteProjects));
+            });
+
+            normalizeFolderList(state.folders).forEach(folderPath => {
+                const projects = folderProjects.get(folderPath) || [];
+                list.appendChild(createFolderGroup(folderPath, projects, canDeleteProjects));
+            });
+        }
         function generateVersion() {
             const now = new Date();
             const m = now.getMonth() + 1;
@@ -1696,40 +1956,98 @@
             return newVer;
         }
 
-        async function addNewProject() {
-            if (state.standalone) {
-                showToast('独立协作模式下禁止新增模块', 'error');
+        async function addNewFolder() {
+            if (state.standalone || isShareMode()) {
+                showToast('当前模式下禁止新增文件夹', 'error');
                 return;
             }
-            const name = prompt("请输入新模块名称：");
-            if (name) {
-                const id = 'p' + Date.now();
-                const newProj = {
-                    id: id,
-                    name: name,
-                    code: `graph TD\n    Start["开始"] --> End["结束"]`,
-                    mappings: {},
-                    remarks: {},
-                    severeBlockers: {},
-                    dataSources: {},
-                    outputs: {},
-                    downstream: {}
-                };
-                state.projects.push(newProj);
-                state.activeProjectId = id;
-                await saveState();
 
-                if (!workspaceHandle) {
-                    if (confirm("是否将此模块保存到本地 modules 文件夹？\n\n开启同步后，您的修改将实时保存。")) {
-                        await connectWorkspace();
-                    }
-                } else {
-                    await syncToWorkspace();
-                }
-                refreshApp();
+            const rawName = prompt('请输入新文件夹名称：');
+            if (!rawName) return;
+
+            const folderPath = normalizeFolderPath(rawName);
+            if (!folderPath) {
+                showToast('文件夹名称无效', 'error');
+                return;
             }
+
+            syncFolderStateFromProjects();
+            if (state.folders.includes(folderPath)) {
+                showToast('文件夹已存在', 'error');
+                return;
+            }
+
+            state.folders = normalizeFolderList([...(state.folders || []), folderPath]);
+            await saveState();
+            if (workspaceHandle) {
+                await syncToWorkspace();
+            }
+            refreshApp();
+            showToast(`已新增文件夹：${folderPath}`, 'success');
         }
 
+        async function deleteFolder(folderPath) {
+            if (state.standalone || isShareMode()) {
+                showToast('当前模式下禁止删除文件夹', 'error');
+                return;
+            }
+            const normalizedFolder = normalizeFolderPath(folderPath);
+            if (!normalizedFolder) return;
+            if (state.projects.some(project => getProjectFolder(project) === normalizedFolder)) {
+                showToast('请先删除该文件夹内的业务模块', 'error');
+                return;
+            }
+            if (!confirm(`确定要删除空文件夹“${normalizedFolder}”吗？`)) return;
+
+            state.folders = normalizeFolderList((state.folders || []).filter(folder => normalizeFolderPath(folder) !== normalizedFolder));
+            collapsedFolders.delete(normalizedFolder);
+            await saveState();
+            if (workspaceHandle) {
+                await syncToWorkspace();
+            }
+            refreshApp();
+            showToast(`已删除文件夹：${normalizedFolder}`, 'success');
+        }
+
+        async function addNewProject(targetFolder = '') {
+            if (state.standalone || isShareMode()) {
+                showToast('当前模式下禁止新增模块', 'error');
+                return;
+            }
+            const folderPath = normalizeFolderPath(targetFolder);
+            const name = prompt(folderPath ? `请输入新模块名称（将创建到 ${folderPath}）：` : '请输入新模块名称：');
+            if (!name) return;
+
+            const id = 'p' + Date.now();
+            const newProj = {
+                id: id,
+                name: name,
+                code: `graph TD\n    Start["开始"] --> End["结束"]`,
+                mappings: {},
+                remarks: {},
+                severeBlockers: {},
+                dataSources: {},
+                outputs: {},
+                downstream: {},
+                _folder: folderPath
+            };
+
+            if (folderPath) {
+                state.folders = normalizeFolderList([...(state.folders || []), folderPath]);
+            }
+            state.projects.push(newProj);
+            state.activeProjectId = id;
+            await saveState();
+
+            if (!workspaceHandle) {
+                if (confirm('是否将此模块保存到本地 modules 文件夹？\n\n开启同步后，您的修改将实时保存。')) {
+                    await connectWorkspace();
+                }
+            } else {
+                await syncToWorkspace();
+            }
+            refreshApp();
+        }
         async function switchProject(id) {
             if (id === state.activeProjectId) return;
             state.activeProjectId = id;
@@ -2503,10 +2821,12 @@
                 setShareContext(payload);
                 projects = payload && payload.project ? [payload.project] : [];
                 state.activeProjectId = projects[0] ? projects[0].id : state.activeProjectId;
+                state.folders = projects[0] && getProjectFolder(projects[0]) ? [getProjectFolder(projects[0])] : [];
             } else {
                 clearShareContext();
                 const payload = await apiRequest('/modules');
                 projects = Array.isArray(payload.projects) ? payload.projects : [];
+                state.folders = Array.isArray(payload.folders) ? normalizeFolderList(payload.folders) : [];
                 if (!projects.some(p => p.id === state.activeProjectId)) {
                     state.activeProjectId = payload.activeProjectId && projects.some(p => p.id === payload.activeProjectId)
                         ? payload.activeProjectId
@@ -2515,6 +2835,7 @@
             }
 
             state.projects = projects.length > 0 ? projects : [cloneDefaultTemplate()];
+            syncFolderStateFromProjects();
             if (!state.projects.some(p => p.id === state.activeProjectId) && state.projects[0]) {
                 state.activeProjectId = state.projects[0].id;
             }
@@ -2551,6 +2872,7 @@
                     if (payload && payload.project) {
                         state.projects = [payload.project];
                         state.activeProjectId = payload.project.id;
+                        state.folders = getProjectFolder(payload.project) ? [getProjectFolder(payload.project)] : [];
                         setShareContext(payload);
                     }
                 } else {
@@ -2558,12 +2880,14 @@
                         method: 'POST',
                         body: JSON.stringify({
                             projects: state.projects,
+                            folders: state.folders,
                             activeProjectId: state.activeProjectId
                         })
                     });
 
                     if (payload && Array.isArray(payload.projects)) {
                         state.projects = payload.projects;
+                        state.folders = Array.isArray(payload.folders) ? normalizeFolderList(payload.folders) : [];
                         if (!state.projects.some(p => p.id === state.activeProjectId) && state.projects[0]) {
                             state.activeProjectId = state.projects[0].id;
                         }
@@ -2700,6 +3024,7 @@
 
             state = {
                 projects: [cloneDefaultTemplate()],
+                folders: [],
                 activeProjectId: DEFAULT_TEMPLATE.id
             };
 

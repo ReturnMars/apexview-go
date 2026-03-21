@@ -35,6 +35,7 @@ type app struct {
 
 type modulesPayload struct {
 	Projects        []map[string]any `json:"projects"`
+	Folders         []string         `json:"folders,omitempty"`
 	ActiveProjectID string           `json:"activeProjectId,omitempty"`
 }
 
@@ -72,6 +73,7 @@ const (
 	appVersion     = "0.2.0"
 	defaultPort    = 18080
 	maxRequestSize = 256 << 20
+	folderMetaFile = "_folders.json"
 )
 
 func main() {
@@ -313,13 +315,16 @@ func (a *app) handleModules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	projects, err := a.readProjects()
+	projects, folders, err := a.readProjects()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, modulesPayload{Projects: projects})
+	writeJSON(w, http.StatusOK, modulesPayload{
+		Projects: projects,
+		Folders:  folders,
+	})
 }
 
 func (a *app) handleModulesSync(w http.ResponseWriter, r *http.Request) {
@@ -338,14 +343,15 @@ func (a *app) handleModulesSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	normalized, err := a.writeProjects(payload.Projects)
+	normalizedProjects, normalizedFolders, err := a.writeProjects(payload.Projects, payload.Folders)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, modulesPayload{
-		Projects:        normalized,
+		Projects:        normalizedProjects,
+		Folders:         normalizedFolders,
 		ActiveProjectID: payload.ActiveProjectID,
 	})
 }
@@ -452,26 +458,46 @@ func (a *app) handleStatic(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, normalizedPath, time.Time{}, bytes.NewReader(data))
 }
 
-func (a *app) readProjects() ([]map[string]any, error) {
-	entries, err := os.ReadDir(a.dataDir)
-	if err != nil {
-		return nil, err
+func (a *app) readProjects() ([]map[string]any, []string, error) {
+	if err := os.MkdirAll(a.dataDir, 0o755); err != nil {
+		return nil, nil, err
 	}
 
-	projects := make([]map[string]any, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
-			continue
-		}
+	fileNames, err := listModuleFiles(a.dataDir)
+	if err != nil {
+		return nil, nil, err
+	}
 
-		project, err := a.readProjectFromFile(entry.Name())
+	projects := make([]map[string]any, 0, len(fileNames))
+	folderSet := make(map[string]struct{})
+	for _, fileName := range fileNames {
+		project, err := a.readProjectFromFile(fileName)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+		if folder := projectFolderPath(fileName); folder != "" {
+			folderSet[folder] = struct{}{}
 		}
 		projects = append(projects, project)
 	}
 
+	extraFolders, err := a.readFolderMetadata()
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, folder := range extraFolders {
+		if folder != "" {
+			folderSet[folder] = struct{}{}
+		}
+	}
+
 	sort.Slice(projects, func(i, j int) bool {
+		leftFolder := projectFolderPath(projectString(projects[i], "_filename"))
+		rightFolder := projectFolderPath(projectString(projects[j], "_filename"))
+		if leftFolder != rightFolder {
+			return leftFolder < rightFolder
+		}
+
 		leftName := projectString(projects[i], "name")
 		rightName := projectString(projects[j], "name")
 		if leftName == rightName {
@@ -480,56 +506,73 @@ func (a *app) readProjects() ([]map[string]any, error) {
 		return leftName < rightName
 	})
 
-	return projects, nil
+	return projects, sortedFolderList(folderSet), nil
 }
 
-func (a *app) writeProjects(projects []map[string]any) ([]map[string]any, error) {
+func (a *app) writeProjects(projects []map[string]any, folders []string) ([]map[string]any, []string, error) {
 	if err := os.MkdirAll(a.dataDir, 0o755); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	usedFileNames := make(map[string]int, len(projects))
 	keepFileNames := make(map[string]struct{}, len(projects))
-	normalized := make([]map[string]any, 0, len(projects))
+	normalizedProjects := make([]map[string]any, 0, len(projects))
+	folderSet := make(map[string]struct{})
+
+	for _, folder := range normalizeFolderList(folders) {
+		if folder != "" {
+			folderSet[folder] = struct{}{}
+		}
+	}
 
 	for _, original := range projects {
 		payload, requestedName, err := normalizeProject(original)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
-		finalName := uniqueFileName(requestedName, usedFileNames)
+		finalName := uniqueModulePath(requestedName, usedFileNames)
 		keepFileNames[finalName] = struct{}{}
+		if folder := projectFolderPath(finalName); folder != "" {
+			folderSet[folder] = struct{}{}
+		}
 
 		savedProject, err := a.writeProjectToFile(payload, finalName)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		normalized = append(normalized, savedProject)
+		normalizedProjects = append(normalizedProjects, savedProject)
 	}
 
-	entries, err := os.ReadDir(a.dataDir)
+	existingFiles, err := listModuleFiles(a.dataDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+	for _, fileName := range existingFiles {
+		if _, keep := keepFileNames[fileName]; keep {
 			continue
 		}
-		if _, keep := keepFileNames[entry.Name()]; keep {
-			continue
-		}
-		if err := os.Remove(filepath.Join(a.dataDir, entry.Name())); err != nil {
-			return nil, fmt.Errorf("remove %s: %w", entry.Name(), err)
+		if err := os.Remove(filepath.Join(a.dataDir, filepath.FromSlash(fileName))); err != nil {
+			return nil, nil, fmt.Errorf("remove %s: %w", fileName, err)
 		}
 	}
 
-	return normalized, nil
+	normalizedFolders := sortedFolderList(folderSet)
+	for _, folder := range normalizedFolders {
+		if err := os.MkdirAll(filepath.Join(a.dataDir, filepath.FromSlash(folder)), 0o755); err != nil {
+			return nil, nil, err
+		}
+	}
+	if err := a.writeFolderMetadata(normalizedFolders); err != nil {
+		return nil, nil, err
+	}
+
+	return normalizedProjects, normalizedFolders, nil
 }
 
 func (a *app) createShare(project map[string]any) (shareRecord, map[string]any, error) {
 	moduleFile := projectString(project, "_filename")
-	if !isSafeJSONFileName(moduleFile) {
+	if !isSafeModulePath(moduleFile) {
 		return shareRecord{}, nil, fmt.Errorf("current module must be saved before sharing")
 	}
 
@@ -604,7 +647,7 @@ func (a *app) readShareRecord(shareID string) (shareRecord, error) {
 	if record.ID == "" {
 		record.ID = shareID
 	}
-	if !isSafeJSONFileName(record.ModuleFile) {
+	if !isSafeModulePath(record.ModuleFile) {
 		return shareRecord{}, fmt.Errorf("share data corrupted")
 	}
 	return record, nil
@@ -633,54 +676,106 @@ func (a *app) shareFilePath(shareID string) string {
 	return filepath.Join(a.shareDir, shareID+".json")
 }
 
+func (a *app) folderMetadataPath() string {
+	return filepath.Join(a.dataDir, folderMetaFile)
+}
+
+func (a *app) readFolderMetadata() ([]string, error) {
+	raw, err := os.ReadFile(a.folderMetadataPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	raw = trimUTF8BOM(raw)
+	folders := []string{}
+	if err := json.Unmarshal(raw, &folders); err != nil {
+		return nil, fmt.Errorf("read folder metadata: %w", err)
+	}
+	return normalizeFolderList(folders), nil
+}
+
+func (a *app) writeFolderMetadata(folders []string) error {
+	folders = normalizeFolderList(folders)
+	path := a.folderMetadataPath()
+	if len(folders) == 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+
+	raw, err := json.MarshalIndent(folders, "", "  ")
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+
+	tempPath := path + ".tmp"
+	if err := os.WriteFile(tempPath, raw, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, path)
+}
+
 func (a *app) readProjectFromFile(fileName string) (map[string]any, error) {
-	if !isSafeJSONFileName(fileName) {
+	if !isSafeModulePath(fileName) {
 		return nil, fmt.Errorf("invalid module file")
 	}
 
-	raw, err := os.ReadFile(filepath.Join(a.dataDir, fileName))
+	normalizedFile := normalizeModulePath(fileName)
+	raw, err := os.ReadFile(filepath.Join(a.dataDir, filepath.FromSlash(normalizedFile)))
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", fileName, err)
+		return nil, fmt.Errorf("read %s: %w", normalizedFile, err)
 	}
 
+	raw = trimUTF8BOM(raw)
 	project := map[string]any{}
 	if err := json.Unmarshal(raw, &project); err != nil {
-		return nil, fmt.Errorf("decode %s: %w", fileName, err)
+		return nil, fmt.Errorf("decode %s: %w", normalizedFile, err)
 	}
 	if projectString(project, "id") == "" || projectString(project, "name") == "" {
-		return nil, fmt.Errorf("project missing id or name: %s", fileName)
+		return nil, fmt.Errorf("project missing id or name: %s", normalizedFile)
 	}
 
-	project["_filename"] = fileName
+	project["_filename"] = normalizedFile
+	project["_folder"] = projectFolderPath(normalizedFile)
 	return project, nil
 }
 
 func (a *app) writeProjectToFile(project map[string]any, fileName string) (map[string]any, error) {
-	if !isSafeJSONFileName(fileName) {
+	if !isSafeModulePath(fileName) {
 		return nil, fmt.Errorf("invalid module file")
 	}
 
-	payload, err := normalizeProjectForFile(project, fileName)
+	normalizedFile := normalizeModulePath(fileName)
+	payload, err := normalizeProjectForFile(project, normalizedFile)
 	if err != nil {
 		return nil, err
 	}
 
 	raw, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("marshal %s: %w", fileName, err)
+		return nil, fmt.Errorf("marshal %s: %w", normalizedFile, err)
 	}
 	raw = append(raw, '\n')
 
-	targetPath := filepath.Join(a.dataDir, fileName)
+	targetPath := filepath.Join(a.dataDir, filepath.FromSlash(normalizedFile))
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir %s: %w", normalizedFile, err)
+	}
 	tempPath := targetPath + ".tmp"
 	if err := os.WriteFile(tempPath, raw, 0o644); err != nil {
-		return nil, fmt.Errorf("write %s: %w", fileName, err)
+		return nil, fmt.Errorf("write %s: %w", normalizedFile, err)
 	}
 	if err := os.Rename(tempPath, targetPath); err != nil {
-		return nil, fmt.Errorf("replace %s: %w", fileName, err)
+		return nil, fmt.Errorf("replace %s: %w", normalizedFile, err)
 	}
 
-	payload["_filename"] = fileName
+	payload["_filename"] = normalizedFile
+	payload["_folder"] = projectFolderPath(normalizedFile)
 	return payload, nil
 }
 
@@ -711,10 +806,17 @@ func normalizeProject(original map[string]any) (map[string]any, string, error) {
 		return nil, "", fmt.Errorf("project missing id or name")
 	}
 
-	fileName := projectString(original, "_filename")
-	if !isSafeJSONFileName(fileName) {
+	fileName := normalizeModulePath(projectString(original, "_filename"))
+	if !isSafeModulePath(fileName) {
+		folder := normalizeFolderPath(projectString(original, "_folder"))
+		if !isSafeFolderPath(folder) {
+			return nil, "", fmt.Errorf("invalid module folder")
+		}
 		version := projectString(cloned, "version")
-		fileName = buildFileName(name, version, id)
+		fileName = joinModulePath(folder, buildFileName(name, version, id))
+	}
+	if !isSafeModulePath(fileName) {
+		return nil, "", fmt.Errorf("invalid module file")
 	}
 
 	return cloned, fileName, nil
@@ -725,7 +827,7 @@ func normalizeProjectForFile(original map[string]any, fileName string) (map[stri
 	if projectString(cloned, "id") == "" || projectString(cloned, "name") == "" {
 		return nil, fmt.Errorf("project missing id or name")
 	}
-	if !isSafeJSONFileName(fileName) {
+	if !isSafeModulePath(fileName) {
 		return nil, fmt.Errorf("invalid module file")
 	}
 	return cloned, nil
@@ -734,7 +836,7 @@ func normalizeProjectForFile(original map[string]any, fileName string) (map[stri
 func cloneProject(original map[string]any) map[string]any {
 	cloned := make(map[string]any, len(original))
 	for key, value := range original {
-		if key == "_filename" {
+		if key == "_filename" || key == "_folder" {
 			continue
 		}
 		cloned[key] = value
@@ -742,16 +844,91 @@ func cloneProject(original map[string]any) map[string]any {
 	return cloned
 }
 
-func uniqueFileName(fileName string, used map[string]int) string {
-	if _, exists := used[fileName]; !exists {
-		used[fileName] = 1
-		return fileName
+func uniqueModulePath(modulePath string, used map[string]int) string {
+	if _, exists := used[modulePath]; !exists {
+		used[modulePath] = 1
+		return modulePath
 	}
 
-	used[fileName] = used[fileName] + 1
-	extension := filepath.Ext(fileName)
-	base := strings.TrimSuffix(fileName, extension)
-	return uniqueFileName(fmt.Sprintf("%s-%d%s", base, used[fileName], extension), used)
+	used[modulePath] = used[modulePath] + 1
+	extension := path.Ext(modulePath)
+	dir := projectFolderPath(modulePath)
+	base := strings.TrimSuffix(path.Base(modulePath), extension)
+	return uniqueModulePath(joinModulePath(dir, fmt.Sprintf("%s-%d%s", base, used[modulePath], extension)), used)
+}
+
+func listModuleFiles(root string) ([]string, error) {
+	files := make([]string, 0)
+
+	err := filepath.WalkDir(root, func(current string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if current == root {
+			return nil
+		}
+		if strings.HasPrefix(entry.Name(), ".") {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		relative, err := filepath.Rel(root, current)
+		if err != nil {
+			return err
+		}
+		relative = filepath.ToSlash(relative)
+
+		if entry.IsDir() {
+			return nil
+		}
+		if strings.EqualFold(relative, folderMetaFile) {
+			return nil
+		}
+		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+			return nil
+		}
+		if !isSafeModulePath(relative) {
+			return fmt.Errorf("invalid module path: %s", relative)
+		}
+
+		files = append(files, relative)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	sort.Strings(files)
+	return files, nil
+}
+
+func normalizeFolderList(folders []string) []string {
+	unique := make(map[string]struct{})
+	for _, folder := range folders {
+		normalized := normalizeFolderPath(folder)
+		if normalized == "" {
+			continue
+		}
+		if !isSafeFolderPath(normalized) {
+			continue
+		}
+		unique[normalized] = struct{}{}
+	}
+	return sortedFolderList(unique)
+}
+
+func sortedFolderList(folderSet map[string]struct{}) []string {
+	folders := make([]string, 0, len(folderSet))
+	for folder := range folderSet {
+		if folder == "" {
+			continue
+		}
+		folders = append(folders, folder)
+	}
+	sort.Strings(folders)
+	return folders
 }
 
 func projectString(project map[string]any, key string) string {
@@ -816,14 +993,94 @@ func sanitizeFilePart(value string) string {
 	return value
 }
 
-func isSafeJSONFileName(value string) bool {
-	if !strings.HasSuffix(strings.ToLower(value), ".json") {
+func normalizeModulePath(value string) string {
+	value = strings.TrimSpace(strings.ReplaceAll(value, "\\", "/"))
+	value = strings.Trim(value, "/")
+	if value == "" {
+		return ""
+	}
+	cleaned := path.Clean(value)
+	if cleaned == "." {
+		return ""
+	}
+	return cleaned
+}
+
+func normalizeFolderPath(value string) string {
+	value = strings.TrimSpace(strings.ReplaceAll(value, "\\", "/"))
+	value = strings.Trim(value, "/")
+	if value == "" {
+		return ""
+	}
+	cleaned := path.Clean(value)
+	if cleaned == "." {
+		return ""
+	}
+	return cleaned
+}
+
+func joinModulePath(folder, fileName string) string {
+	folder = normalizeFolderPath(folder)
+	fileName = strings.TrimSpace(strings.ReplaceAll(fileName, "\\", "/"))
+	if folder == "" {
+		return fileName
+	}
+	return folder + "/" + path.Base(fileName)
+}
+
+func projectFolderPath(fileName string) string {
+	normalized := normalizeModulePath(fileName)
+	if !isSafeModulePath(normalized) {
+		return ""
+	}
+	dir := path.Dir(normalized)
+	if dir == "." {
+		return ""
+	}
+	return dir
+}
+
+func isSafeModulePath(value string) bool {
+	normalized := normalizeModulePath(value)
+	if normalized == "" {
 		return false
 	}
-	if strings.Contains(value, "/") || strings.Contains(value, "\\") {
+	if strings.HasPrefix(strings.ReplaceAll(strings.TrimSpace(value), "\\", "/"), "/") {
 		return false
 	}
-	return strings.TrimSpace(value) != ""
+	if normalized != strings.ReplaceAll(strings.Trim(strings.TrimSpace(value), "/"), "\\", "/") {
+		return false
+	}
+	segments := strings.Split(normalized, "/")
+	for _, segment := range segments {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	if !strings.HasSuffix(strings.ToLower(normalized), ".json") {
+		return false
+	}
+	return !strings.EqualFold(path.Base(normalized), folderMetaFile)
+}
+
+func isSafeFolderPath(value string) bool {
+	normalized := normalizeFolderPath(value)
+	if normalized == "" {
+		return true
+	}
+	if strings.HasPrefix(strings.ReplaceAll(strings.TrimSpace(value), "\\", "/"), "/") {
+		return false
+	}
+	if normalized != strings.ReplaceAll(strings.Trim(strings.TrimSpace(value), "/"), "\\", "/") {
+		return false
+	}
+	segments := strings.Split(normalized, "/")
+	for _, segment := range segments {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func trimUTF8BOM(raw []byte) []byte {
