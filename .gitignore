@@ -3,6 +3,6 @@ dist/
 shares/
 tmp/
 .vite/
-modules/
+/modules/
 .DS_Store
 Thumbs.db
