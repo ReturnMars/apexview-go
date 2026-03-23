@@ -7,11 +7,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"mime"
+	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -27,10 +30,11 @@ import (
 var embeddedWeb embed.FS
 
 type app struct {
-	web      fs.FS
-	dataDir  string
-	shareDir string
-	started  time.Time
+	web       fs.FS
+	dataDir   string
+	assetsDir string
+	shareDir  string
+	started   time.Time
 }
 
 type modulesPayload struct {
@@ -39,10 +43,20 @@ type modulesPayload struct {
 	ActiveProjectID string           `json:"activeProjectId,omitempty"`
 }
 
+type moduleProjectPayload struct {
+	Project         map[string]any `json:"project"`
+	ActiveProjectID string         `json:"activeProjectId,omitempty"`
+}
+
+type workspaceMetadata struct {
+	ActiveProjectID string `json:"activeProjectId,omitempty"`
+}
+
 type runtimePayload struct {
 	AppName   string   `json:"appName"`
 	Version   string   `json:"version"`
 	DataDir   string   `json:"dataDir"`
+	AssetsDir string   `json:"assetsDir"`
 	StartedAt string   `json:"startedAt"`
 	URLs      []string `json:"urls"`
 }
@@ -68,12 +82,18 @@ type sharePayload struct {
 	Links      []string       `json:"links"`
 }
 
+type assetUploadResponse struct {
+	Path string `json:"path"`
+}
+
 const (
-	appName        = "ApexView"
-	appVersion     = "0.2.0"
-	defaultPort    = 18080
-	maxRequestSize = 256 << 20
-	folderMetaFile = "_folders.json"
+	appName            = "ApexView"
+	appVersion         = "0.2.0"
+	defaultPort        = 18080
+	maxRequestSize     = 256 << 20
+	maxAssetUploadSize = 32 << 20
+	folderMetaFile     = "_folders.json"
+	workspaceFile      = "_workspace.json"
 )
 
 func main() {
@@ -87,27 +107,33 @@ func main() {
 	}
 
 	dataDir := detectDataDir()
+	assetsDir := detectAssetsDir(dataDir)
 	shareDir := detectShareDir(dataDir)
-	for _, dir := range []string{dataDir, shareDir} {
+	for _, dir := range []string{dataDir, assetsDir, shareDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			log.Fatalf("create data dir: %v", err)
 		}
 	}
 
 	application := &app{
-		web:      webFS,
-		dataDir:  dataDir,
-		shareDir: shareDir,
-		started:  time.Now(),
+		web:       webFS,
+		dataDir:   dataDir,
+		assetsDir: assetsDir,
+		shareDir:  shareDir,
+		started:   time.Now(),
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", application.handleHealth)
 	mux.HandleFunc("/api/runtime", application.handleRuntime)
+	mux.HandleFunc("/api/assets/upload", application.handleAssetUpload)
 	mux.HandleFunc("/api/modules", application.handleModules)
+	mux.HandleFunc("/api/modules/active", application.handleModulesActive)
+	mux.HandleFunc("/api/modules/project", application.handleModulesProject)
 	mux.HandleFunc("/api/modules/sync", application.handleModulesSync)
 	mux.HandleFunc("/api/shares", application.handleShares)
 	mux.HandleFunc("/api/shares/", application.handleShareByID)
+	mux.HandleFunc("/assets/", application.handleAssetStatic)
 	mux.HandleFunc("/", application.handleStatic)
 
 	listener := mustListen()
@@ -121,6 +147,7 @@ func main() {
 
 	log.Printf("%s %s started", appName, appVersion)
 	log.Printf("data dir: %s", dataDir)
+	log.Printf("assets dir: %s", assetsDir)
 	log.Printf("share dir: %s", shareDir)
 	for _, item := range urls {
 		log.Printf("open: %s", item)
@@ -170,6 +197,10 @@ func detectShareDir(dataDir string) string {
 	return filepath.Join(filepath.Dir(dataDir), "shares")
 }
 
+func detectAssetsDir(dataDir string) string {
+	return filepath.Join(filepath.Dir(dataDir), "assets")
+}
+
 func parsePort() int {
 	raw := strings.TrimSpace(os.Getenv("APEXVIEW_PORT"))
 	if raw == "" {
@@ -184,11 +215,19 @@ func parsePort() int {
 	return value
 }
 
+func envEnabled(name string) bool {
+	raw := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
+	return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
+}
+
 func mustListen() net.Listener {
 	preferred := parsePort()
 	listener, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", preferred))
 	if err == nil {
 		return listener
+	}
+	if envEnabled("APEXVIEW_STRICT_PORT") {
+		log.Fatalf("listen %d: %v", preferred, err)
 	}
 
 	fallback, fallbackErr := net.Listen("tcp", "0.0.0.0:0")
@@ -200,13 +239,23 @@ func mustListen() net.Listener {
 }
 
 func shouldOpenBrowser() bool {
-	raw := strings.TrimSpace(strings.ToLower(os.Getenv("APEXVIEW_NO_BROWSER")))
-	return raw != "1" && raw != "true" && raw != "yes"
+	return !envEnabled("APEXVIEW_NO_BROWSER")
 }
 
 func collectURLs(port int) []string {
 	results := []string{fmt.Sprintf("http://127.0.0.1:%d", port)}
 	seen := map[string]struct{}{results[0]: {}}
+	if override := shareBaseURLOverride(port); override != "" {
+		seen[override] = struct{}{}
+		results = append(results, override)
+	}
+
+	type urlCandidate struct {
+		url   string
+		score int
+	}
+	candidates := make([]urlCandidate, 0)
+	preferredIP := preferredOutboundIPv4()
 
 	interfaces, err := net.Interfaces()
 	if err != nil {
@@ -232,17 +281,149 @@ func collectURLs(port int) []string {
 			if ip == nil {
 				continue
 			}
+			if ip.IsLoopback() || ip.IsLinkLocalMulticast() {
+				continue
+			}
 			url := fmt.Sprintf("http://%s:%d", ip.String(), port)
 			if _, exists := seen[url]; exists {
 				continue
 			}
 			seen[url] = struct{}{}
-			results = append(results, url)
+			candidates = append(candidates, urlCandidate{
+				url:   url,
+				score: scoreShareIP(iface, ip, preferredIP),
+			})
 		}
 	}
 
-	sort.Strings(results)
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].score != candidates[j].score {
+			return candidates[i].score > candidates[j].score
+		}
+		return candidates[i].url < candidates[j].url
+	})
+	for _, candidate := range candidates {
+		results = append(results, candidate.url)
+	}
 	return results
+}
+
+func shareBaseURLOverride(port int) string {
+	raw := strings.TrimSpace(os.Getenv("APEXVIEW_SHARE_BASE_URL"))
+	if raw == "" {
+		return ""
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+
+	if parsed.Scheme == "" {
+		parsed.Scheme = "http"
+	}
+	if parsed.Port() == "" {
+		parsed.Host = net.JoinHostPort(parsed.Hostname(), strconv.Itoa(port))
+	}
+	parsed.Path = ""
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return strings.TrimRight(parsed.String(), "/")
+}
+
+func preferredOutboundIPv4() net.IP {
+	conn, err := net.Dial("udp4", "8.8.8.8:80")
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return nil
+	}
+	return addr.IP.To4()
+}
+
+func scoreShareIP(iface net.Interface, ip net.IP, preferredIP net.IP) int {
+	score := 0
+	if preferredIP != nil && ip.Equal(preferredIP) {
+		score += 1000
+	}
+	if isPrivateIPv4(ip) {
+		score += 300
+	} else if ip.IsGlobalUnicast() {
+		score += 120
+	}
+	if ip.IsLinkLocalUnicast() {
+		score -= 120
+	}
+	if iface.Flags&net.FlagBroadcast != 0 {
+		score += 20
+	}
+	if iface.Flags&net.FlagMulticast != 0 {
+		score += 10
+	}
+	if iface.Flags&net.FlagPointToPoint != 0 {
+		score -= 80
+	}
+	if isLikelyVirtualInterface(iface.Name) {
+		score -= 220
+	}
+	return score
+}
+
+func isPrivateIPv4(ip net.IP) bool {
+	ip = ip.To4()
+	if ip == nil {
+		return false
+	}
+
+	switch {
+	case ip[0] == 10:
+		return true
+	case ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31:
+		return true
+	case ip[0] == 192 && ip[1] == 168:
+		return true
+	default:
+		return false
+	}
+}
+
+func isLikelyVirtualInterface(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if lower == "" {
+		return false
+	}
+
+	patterns := []string{
+		"docker",
+		"veth",
+		"vbox",
+		"virtual",
+		"vmware",
+		"hyper-v",
+		"vethernet",
+		"wsl",
+		"tailscale",
+		"zerotier",
+		"bridge",
+		"br-",
+		"tap",
+		"tun",
+		"nat",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 func openBrowser(url string) {
@@ -300,9 +481,58 @@ func (a *app) handleRuntime(w http.ResponseWriter, r *http.Request) {
 		AppName:   appName,
 		Version:   appVersion,
 		DataDir:   a.dataDir,
+		AssetsDir: a.assetsDir,
 		StartedAt: a.started.Format(time.RFC3339),
 		URLs:      collectURLs(portFromRequest(r)),
 	})
+}
+
+func (a *app) handleAssetUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxAssetUploadSize)
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("parse upload: %w", err))
+		return
+	}
+
+	shareID := strings.TrimSpace(r.FormValue("shareId"))
+	projectID := strings.TrimSpace(r.FormValue("projectId"))
+	nodeID := strings.TrimSpace(r.FormValue("nodeId"))
+	if !isLocalRequest(r) {
+		if shareID == "" {
+			writeError(w, http.StatusForbidden, fmt.Errorf("remote asset upload requires a share id"))
+			return
+		}
+		_, project, err := a.readSharedProject(shareID)
+		if err != nil {
+			if os.IsNotExist(err) {
+				writeError(w, http.StatusNotFound, fmt.Errorf("share not found"))
+				return
+			}
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		projectID = projectString(project, "id")
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("read uploaded file: %w", err))
+		return
+	}
+	defer file.Close()
+
+	storedPath, err := a.saveUploadedAsset(file, header, projectID, nodeID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, assetUploadResponse{Path: storedPath})
 }
 
 func (a *app) handleModules(w http.ResponseWriter, r *http.Request) {
@@ -320,10 +550,75 @@ func (a *app) handleModules(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	workspace, err := a.readWorkspaceMetadata()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 
 	writeJSON(w, http.StatusOK, modulesPayload{
-		Projects: projects,
-		Folders:  folders,
+		Projects:        projects,
+		Folders:         folders,
+		ActiveProjectID: workspace.ActiveProjectID,
+	})
+}
+
+func (a *app) handleModulesActive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if !isLocalRequest(r) {
+		writeError(w, http.StatusForbidden, fmt.Errorf("active module update is local-only"))
+		return
+	}
+
+	payload := modulesPayload{}
+	if err := decodeJSONBody(w, r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := a.writeWorkspaceMetadata(workspaceMetadata{ActiveProjectID: strings.TrimSpace(payload.ActiveProjectID)}); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, modulesPayload{ActiveProjectID: strings.TrimSpace(payload.ActiveProjectID)})
+}
+
+func (a *app) handleModulesProject(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if !isLocalRequest(r) {
+		writeError(w, http.StatusForbidden, fmt.Errorf("module project update is local-only"))
+		return
+	}
+
+	payload := moduleProjectPayload{}
+	if err := decodeJSONBody(w, r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(payload.Project) == 0 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("project payload is required"))
+		return
+	}
+
+	savedProject, err := a.writeSingleProject(payload.Project)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := a.writeWorkspaceMetadata(workspaceMetadata{ActiveProjectID: strings.TrimSpace(payload.ActiveProjectID)}); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, moduleProjectPayload{
+		Project:         savedProject,
+		ActiveProjectID: strings.TrimSpace(payload.ActiveProjectID),
 	})
 }
 
@@ -346,6 +641,10 @@ func (a *app) handleModulesSync(w http.ResponseWriter, r *http.Request) {
 	normalizedProjects, normalizedFolders, err := a.writeProjects(payload.Projects, payload.Folders)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := a.writeWorkspaceMetadata(workspaceMetadata{ActiveProjectID: strings.TrimSpace(payload.ActiveProjectID)}); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -456,6 +755,50 @@ func (a *app) handleStatic(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", contentTypeFor(normalizedPath))
 	http.ServeContent(w, r, normalizedPath, time.Time{}, bytes.NewReader(data))
+}
+
+func (a *app) handleAssetStatic(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		methodNotAllowed(w)
+		return
+	}
+
+	requested := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+	if !strings.HasPrefix(requested, "assets/") {
+		http.NotFound(w, r)
+		return
+	}
+
+	relative, err := normalizeAssetRelativePath(strings.TrimPrefix(requested, "assets/"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	targetPath := filepath.Join(a.assetsDir, filepath.FromSlash(relative))
+	file, err := os.Open(targetPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.NotFound(w, r)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if info.IsDir() {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", contentTypeFor(targetPath))
+	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
 }
 
 func (a *app) readProjects() ([]map[string]any, []string, error) {
@@ -570,6 +913,127 @@ func (a *app) writeProjects(projects []map[string]any, folders []string) ([]map[
 	return normalizedProjects, normalizedFolders, nil
 }
 
+func (a *app) writeSingleProject(project map[string]any) (map[string]any, error) {
+	if err := os.MkdirAll(a.dataDir, 0o755); err != nil {
+		return nil, err
+	}
+
+	payload, requestedName, err := normalizeProject(project)
+	if err != nil {
+		return nil, err
+	}
+
+	originalName := normalizeModulePath(projectString(project, "_filename"))
+	finalName := requestedName
+	if originalName == "" || originalName != finalName {
+		existingFiles, err := listModuleFiles(a.dataDir)
+		if err != nil {
+			return nil, err
+		}
+
+		usedFileNames := make(map[string]int, len(existingFiles))
+		for _, fileName := range existingFiles {
+			if fileName == originalName {
+				continue
+			}
+			usedFileNames[fileName] = 1
+		}
+		finalName = uniqueModulePath(finalName, usedFileNames)
+	}
+
+	savedProject, err := a.writeProjectToFile(payload, finalName)
+	if err != nil {
+		return nil, err
+	}
+
+	if originalName != "" && originalName != finalName {
+		oldPath := filepath.Join(a.dataDir, filepath.FromSlash(originalName))
+		if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("remove %s: %w", originalName, err)
+		}
+	}
+
+	if folder := projectFolderPath(finalName); folder != "" {
+		folders, err := a.readFolderMetadata()
+		if err != nil {
+			return nil, err
+		}
+		folders = normalizeFolderList(append(folders, folder))
+		if err := a.writeFolderMetadata(folders); err != nil {
+			return nil, err
+		}
+	}
+
+	return savedProject, nil
+}
+
+func (a *app) saveUploadedAsset(file multipart.File, header *multipart.FileHeader, projectID, nodeID string) (string, error) {
+	if err := os.MkdirAll(a.assetsDir, 0o755); err != nil {
+		return "", err
+	}
+
+	sniffBuffer := make([]byte, 512)
+	n, err := io.ReadFull(file, sniffBuffer)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return "", fmt.Errorf("inspect uploaded file: %w", err)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", fmt.Errorf("rewind uploaded file: %w", err)
+	}
+
+	contentType := strings.TrimSpace(header.Header.Get("Content-Type"))
+	detectedType := http.DetectContentType(sniffBuffer[:n])
+	if !strings.HasPrefix(strings.ToLower(contentType), "image/") {
+		contentType = detectedType
+	}
+	if !strings.HasPrefix(strings.ToLower(contentType), "image/") {
+		return "", fmt.Errorf("only image uploads are supported")
+	}
+
+	extension := normalizeImageExtension(filepath.Ext(header.Filename))
+	if extension == "" {
+		extension = extensionForContentType(contentType)
+	}
+	if extension == "" {
+		return "", fmt.Errorf("unsupported image type")
+	}
+
+	projectToken := sanitizeAssetToken(projectID, "project")
+	nodeToken := sanitizeAssetToken(nodeID, "image")
+	fileName := fmt.Sprintf("%s-%s-%s%s",
+		nodeToken,
+		time.Now().Format("20060102-150405"),
+		randomHex(4),
+		extension,
+	)
+	relativePath := path.Join(projectToken, fileName)
+	targetPath := filepath.Join(a.assetsDir, filepath.FromSlash(relativePath))
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return "", err
+	}
+
+	tempPath := targetPath + ".tmp"
+	output, err := os.Create(tempPath)
+	if err != nil {
+		return "", fmt.Errorf("create uploaded asset: %w", err)
+	}
+	if _, err := io.Copy(output, file); err != nil {
+		output.Close()
+		_ = os.Remove(tempPath)
+		return "", fmt.Errorf("write uploaded asset: %w", err)
+	}
+	if err := output.Close(); err != nil {
+		_ = os.Remove(tempPath)
+		return "", fmt.Errorf("close uploaded asset: %w", err)
+	}
+	if err := os.Rename(tempPath, targetPath); err != nil {
+		_ = os.Remove(tempPath)
+		return "", fmt.Errorf("replace uploaded asset: %w", err)
+	}
+
+	return "/assets/" + relativePath, nil
+}
+
 func (a *app) createShare(project map[string]any) (shareRecord, map[string]any, error) {
 	moduleFile := projectString(project, "_filename")
 	if !isSafeModulePath(moduleFile) {
@@ -680,6 +1144,10 @@ func (a *app) folderMetadataPath() string {
 	return filepath.Join(a.dataDir, folderMetaFile)
 }
 
+func (a *app) workspaceMetadataPath() string {
+	return filepath.Join(a.dataDir, workspaceFile)
+}
+
 func (a *app) readFolderMetadata() ([]string, error) {
 	raw, err := os.ReadFile(a.folderMetadataPath())
 	if err != nil {
@@ -708,6 +1176,51 @@ func (a *app) writeFolderMetadata(folders []string) error {
 	}
 
 	raw, err := json.MarshalIndent(folders, "", "  ")
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+
+	tempPath := path + ".tmp"
+	if err := os.WriteFile(tempPath, raw, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, path)
+}
+
+func (a *app) readWorkspaceMetadata() (workspaceMetadata, error) {
+	raw, err := os.ReadFile(a.workspaceMetadataPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return workspaceMetadata{}, nil
+		}
+		return workspaceMetadata{}, err
+	}
+
+	raw = trimUTF8BOM(raw)
+	meta := workspaceMetadata{}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return workspaceMetadata{}, fmt.Errorf("read workspace metadata: %w", err)
+	}
+	meta.ActiveProjectID = strings.TrimSpace(meta.ActiveProjectID)
+	return meta, nil
+}
+
+func (a *app) writeWorkspaceMetadata(meta workspaceMetadata) error {
+	if err := os.MkdirAll(a.dataDir, 0o755); err != nil {
+		return err
+	}
+
+	meta.ActiveProjectID = strings.TrimSpace(meta.ActiveProjectID)
+	path := a.workspaceMetadataPath()
+	if meta.ActiveProjectID == "" {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+
+	raw, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -883,7 +1396,7 @@ func listModuleFiles(root string) ([]string, error) {
 		if entry.IsDir() {
 			return nil
 		}
-		if strings.EqualFold(relative, folderMetaFile) {
+		if strings.EqualFold(relative, folderMetaFile) || strings.EqualFold(relative, workspaceFile) {
 			return nil
 		}
 		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
@@ -1194,6 +1707,86 @@ func isShareStaticPath(normalized, original string) bool {
 		return true
 	}
 	return strings.HasPrefix(normalized, "lib/") && strings.HasPrefix(cleaned, "share/")
+}
+
+func normalizeAssetRelativePath(requested string) (string, error) {
+	cleaned := strings.TrimPrefix(path.Clean("/"+requested), "/")
+	if cleaned == "" || cleaned == "." {
+		return "", fmt.Errorf("invalid asset path")
+	}
+
+	parts := strings.Split(cleaned, "/")
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return "", fmt.Errorf("invalid asset path")
+		}
+	}
+	return cleaned, nil
+}
+
+func normalizeImageExtension(extension string) string {
+	switch strings.ToLower(strings.TrimSpace(extension)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg":
+		return strings.ToLower(extension)
+	default:
+		return ""
+	}
+}
+
+func extensionForContentType(contentType string) string {
+	extensions, err := mime.ExtensionsByType(contentType)
+	if err != nil {
+		return ""
+	}
+	for _, extension := range extensions {
+		if normalized := normalizeImageExtension(extension); normalized != "" {
+			return normalized
+		}
+	}
+	return ""
+}
+
+func sanitizeAssetToken(value, fallback string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return fallback
+	}
+
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if r == '-' || r == '_' {
+			builder.WriteRune('-')
+			lastDash = true
+			continue
+		}
+		if !lastDash {
+			builder.WriteRune('-')
+			lastDash = true
+		}
+	}
+
+	token := strings.Trim(builder.String(), "-")
+	if token == "" {
+		return fallback
+	}
+	return token
+}
+
+func randomHex(size int) string {
+	if size <= 0 {
+		return ""
+	}
+	buffer := make([]byte, size)
+	if _, err := rand.Read(buffer); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return strings.ToLower(hex.EncodeToString(buffer))
 }
 
 func contentTypeFor(fileName string) string {

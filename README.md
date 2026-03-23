@@ -21,35 +21,83 @@
 
 在项目根目录执行：
 
+PowerShell:
+
 ```powershell
-$env:GOCACHE='E:\cisdi\PHT\ApexView\apexview-refactor\.cache\go-build'
-$env:GOMODCACHE='E:\cisdi\PHT\ApexView\apexview-refactor\.cache\go-mod'
-$env:GOTMPDIR='E:\cisdi\PHT\ApexView\apexview-refactor\.cache\tmp'
-go -C apexview-refactor build -o dist\ApexView-dev.exe ./src
+$env:GOCACHE="$PWD/.cache/go-build"
+$env:GOMODCACHE="$PWD/.cache/go-mod"
+$env:GOTMPDIR="$PWD/.cache/tmp"
+go build -trimpath -o dist\ApexView-dev.exe ./src
+```
+
+Git Bash:
+
+```bash
+export GOCACHE="$PWD/.cache/go-build"
+export GOMODCACHE="$PWD/.cache/go-mod"
+export GOTMPDIR="$PWD/.cache/tmp"
+go build -trimpath -o dist/ApexView-dev.exe ./src
 ```
 
 然后运行：
 
 ```powershell
-.\apexview-refactor\dist\ApexView-dev.exe
+.\dist\ApexView-dev.exe
 ```
 
 默认监听 `18080` 端口，可通过环境变量 `APEXVIEW_PORT` 覆盖。
+
+## Air 热更新开发
+
+仓库已提供 `.air.toml` 与跨平台 Go 启动脚本。先确保本机已安装 Air：
+
+```powershell
+go install github.com/air-verse/air@latest
+```
+
+然后在项目根目录执行：
+
+```powershell
+go run ./scripts/dev
+```
+
+开发模式约定如下：
+
+- 应用固定监听 `18080`
+- Air 代理与浏览器热刷新监听 `18081`
+- 已自动设置 `APEXVIEW_NO_BROWSER=1`，避免每次重编译都重复弹浏览器
+- 已自动设置 `APEXVIEW_STRICT_PORT=1`，若 `18080` 被占用会直接报错，避免代理连到错误端口
+
+开发时请访问 `http://127.0.0.1:18081`，不要直接访问 `18080`。修改 `src/` 下的 Go、HTML、CSS、JS、JSON、字体文件后，Air 会自动重建并通过代理刷新页面。
+
+注意：Air 在 Windows 上内部仍会通过 PowerShell 执行构建和启动命令。如果本机 PowerShell profile 或执行策略本身有问题，控制台可能出现额外报错；这属于 Air 的上游行为，不是仓库入口脚本导致的。
 
 ## 打包交付
 
 在仓库根目录执行：
 
+PowerShell:
+
 ```powershell
-$env:GOCACHE='E:\cisdi\PHT\ApexView\apexview-refactor\.cache\go-build'
-$env:GOMODCACHE='E:\cisdi\PHT\ApexView\apexview-refactor\.cache\go-mod'
-$env:GOTMPDIR='E:\cisdi\PHT\ApexView\apexview-refactor\.cache\tmp'
-go run ./apexview-refactor/scripts/build.go
+$env:GOCACHE="$PWD/.cache/go-build"
+$env:GOMODCACHE="$PWD/.cache/go-mod"
+$env:GOTMPDIR="$PWD/.cache/tmp"
+go run ./scripts/build.go
+```
+
+Git Bash:
+
+```bash
+export GOCACHE="$PWD/.cache/go-build"
+export GOMODCACHE="$PWD/.cache/go-mod"
+export GOTMPDIR="$PWD/.cache/tmp"
+go run ./scripts/build.go
 ```
 
 会生成：
 
 - `dist/ApexView-win-amd64/` 与 `dist/ApexView-win-amd64.zip`
+- `dist/ApexView-macos-amd64/` 与 `dist/ApexView-macos-amd64.tar.gz`
 - `dist/ApexView-macos-arm64/` 与 `dist/ApexView-macos-arm64.tar.gz`
 
 ## 交付方式
@@ -60,9 +108,19 @@ go run ./apexview-refactor/scripts/build.go
 
 ### macOS
 
-发 `ApexView-macos-arm64.tar.gz` 给同事，解压后双击 `ApexView.app`。
+Apple Silicon（M1/M2/M3/M4）机器使用 `ApexView-macos-arm64.tar.gz`。
+Intel Mac 机器使用 `ApexView-macos-amd64.tar.gz`。
+
+解压后双击 `ApexView.app`。
 
 首次打开如果被系统拦截，需要右键应用并选择“打开”。
+如果仍提示应用不可打开，可在终端执行：
+
+```bash
+xattr -dr com.apple.quarantine ApexView.app
+```
+
+注意：当前交付包未做 Apple Developer 签名和 notarization。在部分 macOS 或企业管控环境下，即使包本身正确，也可能被 Gatekeeper 阻止；这种情况需要在 macOS 上完成签名后再交付。
 
 ## 当前限制
 

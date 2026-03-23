@@ -1,6 +1,7 @@
 .cache/
 dist/
 shares/
+tmp/
 
 .DS_Store
 Thumbs.db

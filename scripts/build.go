@@ -26,17 +26,20 @@ func main() {
 	must(err)
 
 	distDir := filepath.Join(projectRoot, "dist")
-	must(os.RemoveAll(distDir))
 	must(os.MkdirAll(distDir, 0o755))
 
 	targets := []target{
 		{GOOS: "windows", GOARCH: "amd64", Bundle: "ApexView-win-amd64", Archive: "zip"},
+		{GOOS: "darwin", GOARCH: "amd64", Bundle: "ApexView-macos-amd64", Archive: "tar.gz"},
 		{GOOS: "darwin", GOARCH: "arm64", Bundle: "ApexView-macos-arm64", Archive: "tar.gz"},
 	}
 
 	for _, item := range targets {
+		must(cleanTargetArtifacts(distDir, item))
+		stageDir, err := prepareStageDir(projectRoot, item)
+		must(err)
 		fmt.Printf("building %s/%s\n", item.GOOS, item.GOARCH)
-		must(buildTarget(projectRoot, distDir, item))
+		must(buildTarget(projectRoot, stageDir, distDir, item))
 	}
 
 	fmt.Printf("artifacts written to %s\n", distDir)
@@ -60,11 +63,36 @@ func detectProjectRoot() (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("could not locate apexview-refactor root from %s", workingDir)
+	return "", fmt.Errorf("could not locate project root from %s", workingDir)
 }
 
-func buildTarget(projectRoot, distDir string, item target) error {
-	bundleRoot := filepath.Join(distDir, item.Bundle)
+func cleanTargetArtifacts(distDir string, item target) error {
+	paths := []string{
+		filepath.Join(distDir, item.Bundle+".zip"),
+		filepath.Join(distDir, item.Bundle+".tar.gz"),
+	}
+
+	for _, targetPath := range paths {
+		if err := os.RemoveAll(targetPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove %s: %w", targetPath, err)
+		}
+	}
+	return nil
+}
+
+func prepareStageDir(projectRoot string, item target) (string, error) {
+	stageDir := filepath.Join(projectRoot, ".cache", "package", item.Bundle)
+	if err := os.RemoveAll(stageDir); err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+		return "", err
+	}
+	return stageDir, nil
+}
+
+func buildTarget(projectRoot, stageDir, distDir string, item target) error {
+	bundleRoot := filepath.Join(stageDir, item.Bundle)
 	if err := os.MkdirAll(bundleRoot, 0o755); err != nil {
 		return err
 	}
@@ -85,7 +113,9 @@ func buildTarget(projectRoot, distDir string, item target) error {
 		if err := os.WriteFile(filepath.Join(bundleRoot, "README.txt"), []byte(windowsReadme()), 0o644); err != nil {
 			return err
 		}
-		return zipFolder(filepath.Join(distDir, item.Bundle+".zip"), bundleRoot, item.Bundle)
+		if err := zipFolder(filepath.Join(distDir, item.Bundle+".zip"), bundleRoot, item.Bundle); err != nil {
+			return err
+		}
 	case "darwin":
 		appRoot := filepath.Join(bundleRoot, "ApexView.app")
 		macOSDir := filepath.Join(appRoot, "Contents", "MacOS")
@@ -109,10 +139,24 @@ func buildTarget(projectRoot, distDir string, item target) error {
 		if err := os.WriteFile(filepath.Join(bundleRoot, "README.txt"), []byte(macReadme(item.GOARCH)), 0o644); err != nil {
 			return err
 		}
-		return tarGzFolder(filepath.Join(distDir, item.Bundle+".tar.gz"), bundleRoot, item.Bundle)
+		if err := tarGzFolder(filepath.Join(distDir, item.Bundle+".tar.gz"), bundleRoot, item.Bundle); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("unsupported target: %s/%s", item.GOOS, item.GOARCH)
 	}
+
+	if err := publishBundleDir(bundleRoot, filepath.Join(distDir, item.Bundle)); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: publish %s: %v\n", item.Bundle, err)
+	}
+	return nil
+}
+
+func publishBundleDir(source, destination string) error {
+	if err := os.RemoveAll(destination); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return copyDir(source, destination)
 }
 
 func goBuild(projectRoot, goos, goarch, output string) error {

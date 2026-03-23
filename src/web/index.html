@@ -803,11 +803,45 @@
         @keyframes btn-spin {
             to { transform: rotate(360deg); }
         }
+
+        .conn-overlay-card {
+            width: min(520px, calc(100vw - 32px));
+            background: rgba(255, 255, 255, 0.98);
+            border: 1px solid rgba(0, 0, 0, 0.06);
+            border-radius: 20px;
+            box-shadow: 0 24px 60px rgba(0, 0, 0, 0.12);
+            padding: 36px 32px 28px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 18px;
+            text-align: center;
+        }
+
+        .conn-overlay-status {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 28px;
+            padding: 0 12px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+        }
+
+        .conn-overlay-spinner {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            border: 3px solid rgba(0, 82, 217, 0.15);
+            border-top-color: var(--primary);
+            animation: btn-spin 0.7s linear infinite;
+        }
     </style>
 </head>
 
 <body>
-
     <div id="hover-preview"></div>
 
     <div id="toast"
@@ -820,21 +854,28 @@
 
     <div id="conn-overlay"
         style="display:none; position:fixed; inset:0; background:rgba(255,255,255,0.95); z-index:9999; flex-direction:column; align-items:center; justify-content:center; gap:24px; backdrop-filter:blur(8px);">
-        <div
-            style="width: 60px; height: 60px; background: #e6f7ff; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: var(--primary);">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-            </svg>
+        <div class="conn-overlay-card">
+            <div id="conn-overlay-icon"
+                style="width: 60px; height: 60px; background: #e6f7ff; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: var(--primary);">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                </svg>
+            </div>
+            <div id="conn-overlay-spinner" class="conn-overlay-spinner"></div>
+            <div id="conn-overlay-status" class="conn-overlay-status"
+                style="background: rgba(0, 82, 217, 0.08); color: var(--primary);">
+                连接中
+            </div>
+            <div>
+                <h2 id="conn-overlay-title" style="margin:0 0 8px 0; color:#1d2129;">正在连接后端服务</h2>
+                <p id="conn-overlay-message" style="margin:0; color:#86909c;">正在加载 modules 目录中的业务模块，请稍候</p>
+            </div>
+            <button id="workspace-connect-btn" class="btn btn-primary" onclick="connectWorkspace()"
+                style="display:none; padding: 12px 32px; font-size: 1rem;">
+                <span class="btn-text">重新连接后端服务</span>
+            </button>
+            <div id="conn-overlay-tip" style="font-size: 0.85rem; color: #86909c;">连接成功后将自动进入主页面</div>
         </div>
-        <div style="text-align: center;">
-            <h2 style="margin:0 0 8px 0; color:#1d2129;">欢迎使用业务设计平台</h2>
-            <p style="margin:0; color:#86909c;">正在连接本地后端服务，并加载 modules 目录中的业务模块</p>
-        </div>
-        <button id="workspace-connect-btn" class="btn btn-primary" onclick="connectWorkspace()"
-            style="padding: 12px 32px; font-size: 1rem;">
-            重新连接后端服务
-        </button>
-        <div style="font-size: 0.85rem; color: #86909c;">程序启动后会自动托管前端，并由后端直接读写 modules 文件夹</div>
     </div>
 
     <div class="app">
@@ -929,14 +970,6 @@
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <polyline points="11 17 6 12 11 7"></polyline>
                                 <polyline points="18 17 13 12 18 7"></polyline>
-                            </svg>
-                        </button>
-                        <button class="btn btn-ghost" onclick="connectWorkspace()" title="重新连接后端服务"
-                            style="padding: 0 4px; color: #52c41a;">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                stroke-width="2">
-                                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-                                <path d="M12 11v6M9 14h6" />
                             </svg>
                         </button>
                         <button class="btn btn-ghost" onclick="addNewFolder()" title="新增文件夹"
@@ -1181,6 +1214,12 @@
         let selfFileHandle = null;
         let _syncLock = false;
         let _syncPending = false;
+        let _activeProjectSyncLock = false;
+        let _activeProjectSyncPending = false;
+        let _connectLock = null;
+        let _lastWorkspaceStructureSignature = '';
+        let _lastProjectSyncSignatures = {};
+        let _lastShareSyncSignature = '';
         let _storageDbPromise = null;
         let _storageWarningShown = false;
 
@@ -1286,6 +1325,7 @@
         /* STATE_END */
 
         const API_BASE = '/api';
+        const WORKSPACE_ACTIVE_PROJECT_KEY = `${STORAGE_KEY}_active_project`;
         const EMBEDDED_LIB_FILES = [
             'lib/mermaid.min.js',
             'lib/jszip.min.js',
@@ -1303,9 +1343,12 @@
 
         async function apiRequest(endpoint, options = {}) {
             const requestOptions = { ...options };
+            const requestHeaders = { ...(requestOptions.headers || {}) };
+            const hasExplicitContentType = Object.keys(requestHeaders).some(key => key.toLowerCase() === 'content-type');
+            const shouldSendJson = !!requestOptions.body && !(requestOptions.body instanceof FormData) && !hasExplicitContentType;
             requestOptions.headers = {
-                ...(requestOptions.body ? { 'Content-Type': 'application/json' } : {}),
-                ...(requestOptions.headers || {})
+                ...(shouldSendJson ? { 'Content-Type': 'application/json' } : {}),
+                ...requestHeaders
             };
 
             const response = await fetch(API_BASE + endpoint, requestOptions);
@@ -1346,7 +1389,7 @@
         }
 
         function isShareMode() {
-            return !!shareContext.id && !state.standalone;
+            return !!getShareIdFromLocation() && !state.standalone;
         }
 
         function setShareContext(payload) {
@@ -1365,6 +1408,21 @@
             }
             const lanLink = links.find(link => !/127.0.0.1|localhost/.test(link));
             return lanLink || links[0] || '';
+        }
+
+        function buildShareLinkPromptMessage(preferredLink, links = shareContext.links) {
+            const candidates = Array.isArray(links) ? links.filter(Boolean) : [];
+            const alternatives = candidates.filter(link => link !== preferredLink);
+            if (alternatives.length === 0) {
+                return '请复制并发送以下分享链接：';
+            }
+            return `请复制并发送以下分享链接：
+
+优先使用：
+${preferredLink}
+
+若对方无法访问，请改用以下地址：
+${alternatives.join('\n')}`;
         }
 
         async function copyText(text) {
@@ -1398,11 +1456,11 @@
             }
 
             const copied = await copyText(preferredLink);
-            showToast(copied ? successMessage + '，已复制到剪贴板' : successMessage);
+            showToast(copied ? successMessage + '，已复制优先地址到剪贴板' : successMessage);
             if (Array.isArray(payload && payload.links) && payload.links.length > 0) {
                 console.log('Available share links\n' + payload.links.join('\n'));
             }
-            window.prompt('请复制并发送以下分享链接：', preferredLink);
+            window.prompt(buildShareLinkPromptMessage(preferredLink, payload && payload.links ? payload.links : []), preferredLink);
             return preferredLink;
         }
 
@@ -1696,6 +1754,99 @@
             showToast(message);
         }
 
+        function buildSyncProjectPayload(project) {
+            if (!project || typeof project !== 'object') return {};
+            const payload = {};
+            Object.keys(project).forEach(key => {
+                if (key === '_filename') return;
+                payload[key] = project[key];
+            });
+            return payload;
+        }
+
+        function stableSerialize(value) {
+            if (Array.isArray(value)) {
+                return `[${value.map(item => stableSerialize(item)).join(',')}]`;
+            }
+            if (value && typeof value === 'object') {
+                const keys = Object.keys(value).sort();
+                return `{${keys.map(key => `${JSON.stringify(key)}:${stableSerialize(value[key])}`).join(',')}}`;
+            }
+            return JSON.stringify(value);
+        }
+
+        function buildProjectSyncSignature(project) {
+            return stableSerialize(buildSyncProjectPayload(project || {}));
+        }
+
+        function buildWorkspaceStructureSignature() {
+            return stableSerialize({
+                folders: normalizeFolderList(state.folders || []),
+                projects: (state.projects || []).map(project => ({
+                    id: project && project.id ? project.id : '',
+                    filename: project && project._filename ? project._filename : '',
+                    folder: getProjectFolder(project)
+                }))
+            });
+        }
+
+        function buildProjectSyncSignatureMap(projects = state.projects || []) {
+            const signatures = {};
+            projects.forEach(project => {
+                if (!project || !project.id) return;
+                signatures[project.id] = buildProjectSyncSignature(project);
+            });
+            return signatures;
+        }
+
+        function buildShareSyncSignature() {
+            const activeProject = state.projects.find(project => project.id === state.activeProjectId);
+            return stableSerialize({
+                id: shareContext.id,
+                project: buildSyncProjectPayload(activeProject || {})
+            });
+        }
+
+        function getChangedProjectIds() {
+            const currentSignatures = buildProjectSyncSignatureMap();
+            return Object.keys(currentSignatures).filter(projectId => currentSignatures[projectId] !== (_lastProjectSyncSignatures[projectId] || ''));
+        }
+
+        function updateLastSyncSignatureFromState() {
+            if (isShareMode()) {
+                _lastShareSyncSignature = buildShareSyncSignature();
+                _lastWorkspaceStructureSignature = '';
+                _lastProjectSyncSignatures = {};
+                return;
+            }
+            _lastWorkspaceStructureSignature = buildWorkspaceStructureSignature();
+            _lastProjectSyncSignatures = buildProjectSyncSignatureMap();
+            _lastShareSyncSignature = '';
+        }
+
+        function loadPreferredWorkspaceActiveProjectId() {
+            if (state.standalone || isShareMode()) return '';
+            try {
+                return (localStorage.getItem(WORKSPACE_ACTIVE_PROJECT_KEY) || '').trim();
+            } catch (_) {
+                return '';
+            }
+        }
+
+        function persistPreferredWorkspaceActiveProjectId(projectId) {
+            if (state.standalone || isShareMode()) return;
+            try {
+                const normalized = typeof projectId === 'string' ? projectId.trim() : '';
+                if (normalized) {
+                    localStorage.setItem(WORKSPACE_ACTIVE_PROJECT_KEY, normalized);
+                } else {
+                    localStorage.removeItem(WORKSPACE_ACTIVE_PROJECT_KEY);
+                }
+            } catch (_) {
+                // Ignore storage failures for selection persistence.
+            }
+        }
+
         // Lightweight state loader for early boot
         function loadStateFromLocalCache() {
             try {
@@ -1728,6 +1879,119 @@
         // Run immediately to hydrate lightweight cache
         if (window.location.protocol === 'file:') {
             loadStateFromLocalCache();
+        }
+
+        function setConnectionOverlayState(status, detail = '') {
+            const overlay = document.getElementById('conn-overlay');
+            const spinner = document.getElementById('conn-overlay-spinner');
+            const statusNode = document.getElementById('conn-overlay-status');
+            const titleNode = document.getElementById('conn-overlay-title');
+            const messageNode = document.getElementById('conn-overlay-message');
+            const tipNode = document.getElementById('conn-overlay-tip');
+            const connectButton = document.getElementById('workspace-connect-btn');
+            const iconWrap = document.getElementById('conn-overlay-icon');
+            if (!overlay) return;
+
+            overlay.style.display = 'flex';
+            if (spinner) spinner.style.display = status === 'connecting' ? 'block' : 'none';
+            if (connectButton) {
+                connectButton.style.display = status === 'error' ? 'inline-flex' : 'none';
+                connectButton.classList.remove('btn-loading');
+            }
+
+            switch (status) {
+                case 'connecting':
+                    if (statusNode) {
+                        statusNode.textContent = '连接中';
+                        statusNode.style.background = 'rgba(0, 82, 217, 0.08)';
+                        statusNode.style.color = 'var(--primary)';
+                    }
+                    if (titleNode) titleNode.textContent = '正在连接后端服务';
+                    if (messageNode) messageNode.textContent = detail || '正在加载 modules 目录中的业务模块，请稍候';
+                    if (tipNode) tipNode.textContent = '连接成功后将自动进入主页面';
+                    if (iconWrap) iconWrap.style.background = '#e6f7ff';
+                    break;
+                case 'success':
+                    if (statusNode) {
+                        statusNode.textContent = '连接成功';
+                        statusNode.style.background = 'rgba(0, 168, 112, 0.12)';
+                        statusNode.style.color = '#00a870';
+                    }
+                    if (titleNode) titleNode.textContent = '后端服务已连接';
+                    if (messageNode) messageNode.textContent = detail || '业务模块加载完成，正在进入主页面';
+                    if (tipNode) tipNode.textContent = '即将切换到当前工作区';
+                    if (iconWrap) iconWrap.style.background = 'rgba(0, 168, 112, 0.12)';
+                    break;
+                case 'error':
+                    if (statusNode) {
+                        statusNode.textContent = '连接失败';
+                        statusNode.style.background = 'rgba(245, 34, 45, 0.08)';
+                        statusNode.style.color = '#cf1322';
+                    }
+                    if (titleNode) titleNode.textContent = '无法连接后端服务';
+                    if (messageNode) messageNode.textContent = detail || '请确认桌面程序仍在运行，然后重试';
+                    if (tipNode) tipNode.textContent = '连接恢复后会自动返回当前主页面';
+                    if (iconWrap) iconWrap.style.background = 'rgba(245, 34, 45, 0.08)';
+                    break;
+                default:
+                    if (statusNode) {
+                        statusNode.textContent = '等待连接';
+                        statusNode.style.background = 'rgba(78, 89, 105, 0.08)';
+                        statusNode.style.color = '#4e5969';
+                    }
+                    if (titleNode) titleNode.textContent = '请通过桌面程序打开';
+                    if (messageNode) messageNode.textContent = detail || '当前页面未连接后端服务，无法读取 modules 目录';
+                    if (tipNode) tipNode.textContent = '请从桌面程序或本地后端入口进入';
+                    if (iconWrap) iconWrap.style.background = 'rgba(78, 89, 105, 0.08)';
+                    break;
+            }
+        }
+
+        function hideConnectionOverlay() {
+            const overlay = document.getElementById('conn-overlay');
+            if (overlay) overlay.style.display = 'none';
+        }
+
+        function resolveActiveProjectId(projects, ...candidates) {
+            for (const candidate of candidates) {
+                if (!candidate) continue;
+                const normalized = String(candidate).trim();
+                if (normalized && projects.some(project => project.id === normalized)) {
+                    return normalized;
+                }
+            }
+            return projects[0] ? projects[0].id : state.activeProjectId;
+        }
+
+        async function fetchWorkspaceState() {
+            const requestedShareId = getShareIdFromLocation();
+            if (requestedShareId) {
+                const payload = await apiRequest('/shares/' + encodeURIComponent(requestedShareId));
+                const projects = payload && payload.project ? [payload.project] : [];
+                return {
+                    projects,
+                    folders: projects[0] && getProjectFolder(projects[0]) ? [getProjectFolder(projects[0])] : [],
+                    activeProjectId: projects[0] ? projects[0].id : state.activeProjectId,
+                    sharePayload: payload
+                };
+            }
+
+            const payload = await apiRequest('/modules');
+            const projects = Array.isArray(payload.projects) ? payload.projects : [];
+            const folders = Array.isArray(payload.folders) ? normalizeFolderList(payload.folders) : [];
+            const activeProjectId = resolveActiveProjectId(
+                projects,
+                state.activeProjectId,
+                loadPreferredWorkspaceActiveProjectId(),
+                payload.activeProjectId
+            );
+
+            return {
+                projects,
+                folders,
+                activeProjectId,
+                sharePayload: null
+            };
         }
 
         // --- UI Logic ---
@@ -1979,9 +2243,6 @@
 
             state.folders = normalizeFolderList([...(state.folders || []), folderPath]);
             await saveState();
-            if (workspaceHandle) {
-                await syncToWorkspace();
-            }
             refreshApp();
             showToast(`已新增文件夹：${folderPath}`, 'success');
         }
@@ -2002,9 +2263,6 @@
             state.folders = normalizeFolderList((state.folders || []).filter(folder => normalizeFolderPath(folder) !== normalizedFolder));
             collapsedFolders.delete(normalizedFolder);
             await saveState();
-            if (workspaceHandle) {
-                await syncToWorkspace();
-            }
             refreshApp();
             showToast(`已删除文件夹：${normalizedFolder}`, 'success');
         }
@@ -2037,24 +2295,24 @@
             }
             state.projects.push(newProj);
             state.activeProjectId = id;
+            persistPreferredWorkspaceActiveProjectId(id);
             await saveState();
 
             if (!workspaceHandle) {
                 if (confirm('是否将此模块保存到本地 modules 文件夹？\n\n开启同步后，您的修改将实时保存。')) {
                     await connectWorkspace();
                 }
-            } else {
-                await syncToWorkspace();
             }
             refreshApp();
         }
         async function switchProject(id) {
             if (id === state.activeProjectId) return;
             state.activeProjectId = id;
-            await saveState();
+            persistPreferredWorkspaceActiveProjectId(id);
             refreshApp();
             document.getElementById('inspect-detail').style.display = 'none';
             document.getElementById('inspect-empty').style.display = 'block';
+            syncActiveProjectSelection();
         }
 
         async function deleteProject(e, id) {
@@ -2063,6 +2321,7 @@
             if (confirm("确定要删除该模块吗？")) {
                 state.projects = state.projects.filter(p => p.id !== id);
                 if (state.activeProjectId === id) state.activeProjectId = state.projects[0].id;
+                persistPreferredWorkspaceActiveProjectId(state.activeProjectId);
                 await saveState();
                 refreshApp();
             }
@@ -2222,7 +2481,11 @@
             let paths = getProjectNodePaths(p, selection.nodeId);
 
             if (path) {
-                if (!path.startsWith('http') && !path.startsWith('file:///') && !path.startsWith('data:')) {
+                const isServerAssetPath = path.startsWith('/assets/')
+                    || path.startsWith('assets/')
+                    || path.startsWith('./assets/')
+                    || path.startsWith('../assets/');
+                if (!isServerAssetPath && !path.startsWith('http') && !path.startsWith('file:///') && !path.startsWith('data:')) {
                     path = 'file:///' + path.replace(/^file:\/\/\//, '').replace(/^\//, '');
                 }
                 path = normalizeRenderableAssetPath(path);
@@ -2468,20 +2731,81 @@
 
         function handleFileSelect(event) {
             const file = event.target.files[0];
+            event.target.value = '';
             if (file) processImageFile(file);
         }
 
-        function processImageFile(file) {
+        function readFileAsDataURL(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = e => resolve(e.target.result);
+                reader.onerror = () => reject(reader.error || new Error('读取图片失败'));
+                reader.readAsDataURL(file);
+            });
+        }
+
+        function guessImageExtension(contentType) {
+            switch ((contentType || '').toLowerCase()) {
+                case 'image/jpeg':
+                    return '.jpg';
+                case 'image/png':
+                    return '.png';
+                case 'image/gif':
+                    return '.gif';
+                case 'image/webp':
+                    return '.webp';
+                case 'image/bmp':
+                    return '.bmp';
+                case 'image/svg+xml':
+                    return '.svg';
+                default:
+                    return '';
+            }
+        }
+
+        function buildUploadFileName(file, nodeId) {
+            const provided = file && typeof file.name === 'string' ? file.name.trim() : '';
+            if (provided) return provided;
+            return `${nodeId || 'image'}${guessImageExtension(file && file.type) || '.png'}`;
+        }
+
+        async function uploadImageAsset(file, nodeId) {
+            const activeProject = state.projects.find(x => x.id === state.activeProjectId);
+            if (!activeProject) {
+                throw new Error('当前模块不存在，无法上传图片');
+            }
+
+            const formData = new FormData();
+            formData.append('file', file, buildUploadFileName(file, nodeId));
+            formData.append('projectId', activeProject.id || '');
+            formData.append('nodeId', nodeId || '');
+            if (isShareMode() && shareContext.id) {
+                formData.append('shareId', shareContext.id);
+            }
+
+            const payload = await apiRequest('/assets/upload', {
+                method: 'POST',
+                body: formData
+            });
+            if (!payload || typeof payload.path !== 'string' || !payload.path.trim()) {
+                throw new Error('图片上传成功，但后端未返回可用路径');
+            }
+            return payload.path.trim();
+        }
+
+        async function processImageFile(file) {
             if (!file.type.startsWith('image/')) return;
             const targetNodeId = selection.nodeId;
             if (!targetNodeId) return;
-            const reader = new FileReader();
-            reader.onload = async (e) => {
-                const base64 = e.target.result;
-                const p = state.projects.find(x => x.id === state.activeProjectId);
+            const p = state.projects.find(x => x.id === state.activeProjectId);
+            if (!p) return;
+            try {
+                const storedPath = isServerMode()
+                    ? await uploadImageAsset(file, targetNodeId)
+                    : await readFileAsDataURL(file);
                 let paths = getProjectNodePaths(p, targetNodeId);
 
-                paths.push(base64);
+                paths.push(storedPath);
                 p.mappings[targetNodeId] = paths;
 
                 await saveState();
@@ -2489,8 +2813,10 @@
                     updateImagePreview(paths);
                 }
                 renderGallery();
-            };
-            reader.readAsDataURL(file);
+            } catch (err) {
+                console.error('Image upload failed:', err);
+                showToast('图片上传失败: ' + err.message);
+            }
         }
 
         // Clipboard Paste
@@ -2643,6 +2969,8 @@
                     showStorageWarning("检测到内嵌截图较大，浏览器仅保留轻量缓存，请尽快连接工作区或导出 HTML。");
                 }
             }
+
+            persistPreferredWorkspaceActiveProjectId(state.activeProjectId);
 
             if (!state.standalone) {
                 await syncToWorkspace();
@@ -2798,56 +3126,42 @@
         }
 
         async function initWorkspace() {
-            const overlay = document.getElementById('conn-overlay');
-            const connectButton = document.getElementById('workspace-connect-btn');
             if (state.standalone) {
-                if (overlay) overlay.style.display = 'none';
+                hideConnectionOverlay();
                 return;
             }
 
             if (!isServerMode()) {
-                if (overlay) overlay.style.display = 'flex';
+                setConnectionOverlayState('idle');
                 return;
             }
 
-            if (overlay) overlay.style.display = 'flex';
-            if (connectButton) connectButton.textContent = '重新连接后端服务';
+            await connectWorkspace({ suppressToast: true });
+        }
 
-            const requestedShareId = getShareIdFromLocation();
-            let projects = [];
+        async function syncActiveProjectSelection() {
+            if (state.standalone || !isServerMode() || isShareMode()) return;
+            if (_syncLock || _activeProjectSyncLock) {
+                _activeProjectSyncPending = true;
+                return;
+            }
 
-            if (requestedShareId) {
-                const payload = await apiRequest('/shares/' + encodeURIComponent(requestedShareId));
-                setShareContext(payload);
-                projects = payload && payload.project ? [payload.project] : [];
-                state.activeProjectId = projects[0] ? projects[0].id : state.activeProjectId;
-                state.folders = projects[0] && getProjectFolder(projects[0]) ? [getProjectFolder(projects[0])] : [];
-            } else {
-                clearShareContext();
-                const payload = await apiRequest('/modules');
-                projects = Array.isArray(payload.projects) ? payload.projects : [];
-                state.folders = Array.isArray(payload.folders) ? normalizeFolderList(payload.folders) : [];
-                if (!projects.some(p => p.id === state.activeProjectId)) {
-                    state.activeProjectId = payload.activeProjectId && projects.some(p => p.id === payload.activeProjectId)
-                        ? payload.activeProjectId
-                        : (projects[0] ? projects[0].id : state.activeProjectId);
+            _activeProjectSyncLock = true;
+            _activeProjectSyncPending = false;
+            try {
+                await apiRequest('/modules/active', {
+                    method: 'POST',
+                    body: JSON.stringify({ activeProjectId: state.activeProjectId })
+                });
+            } catch (err) {
+                console.warn('Active module sync skipped:', err);
+            } finally {
+                _activeProjectSyncLock = false;
+                if (_activeProjectSyncPending) {
+                    _activeProjectSyncPending = false;
+                    syncActiveProjectSelection();
                 }
             }
-
-            state.projects = projects.length > 0 ? projects : [cloneDefaultTemplate()];
-            syncFolderStateFromProjects();
-            if (!state.projects.some(p => p.id === state.activeProjectId) && state.projects[0]) {
-                state.activeProjectId = state.projects[0].id;
-            }
-
-            state.standalone = false;
-            workspaceHandle = { backend: true };
-            modulesHandle = { backend: true };
-            libHandle = { backend: true };
-
-            if (overlay) overlay.style.display = 'none';
-            const syncIndicator = document.getElementById('sync-indicator');
-            if (syncIndicator) syncIndicator.style.display = 'flex';
         }
 
         async function syncToWorkspace() {
@@ -2861,8 +3175,17 @@
             _syncPending = false;
 
             try {
-                let payload;
                 if (isShareMode()) {
+                    const nextShareSignature = buildShareSyncSignature();
+                    if (nextShareSignature && nextShareSignature === _lastShareSyncSignature) {
+                        workspaceHandle = { backend: true };
+                        modulesHandle = { backend: true };
+                        const syncIndicator = document.getElementById('sync-indicator');
+                        if (syncIndicator) syncIndicator.style.display = 'flex';
+                        return;
+                    }
+
+                    let payload;
                     const activeProj = state.projects.find(x => x.id === state.activeProjectId);
                     if (!activeProj) throw new Error('当前分享模块不存在');
                     payload = await apiRequest('/shares/' + encodeURIComponent(shareContext.id), {
@@ -2876,26 +3199,60 @@
                         setShareContext(payload);
                     }
                 } else {
-                    payload = await apiRequest('/modules/sync', {
-                        method: 'POST',
-                        body: JSON.stringify({
-                            projects: state.projects,
-                            folders: state.folders,
-                            activeProjectId: state.activeProjectId
-                        })
-                    });
+                    const structureChanged = buildWorkspaceStructureSignature() !== _lastWorkspaceStructureSignature;
+                    if (!structureChanged) {
+                        const changedProjectIds = getChangedProjectIds();
+                        if (changedProjectIds.length === 0) {
+                            workspaceHandle = { backend: true };
+                            modulesHandle = { backend: true };
+                            const syncIndicator = document.getElementById('sync-indicator');
+                            if (syncIndicator) syncIndicator.style.display = 'flex';
+                            return;
+                        }
 
-                    if (payload && Array.isArray(payload.projects)) {
-                        state.projects = payload.projects;
-                        state.folders = Array.isArray(payload.folders) ? normalizeFolderList(payload.folders) : [];
-                        if (!state.projects.some(p => p.id === state.activeProjectId) && state.projects[0]) {
-                            state.activeProjectId = state.projects[0].id;
+                        for (const projectId of changedProjectIds) {
+                            const targetProject = state.projects.find(project => project.id === projectId);
+                            if (!targetProject) continue;
+
+                            const payload = await apiRequest('/modules/project', {
+                                method: 'POST',
+                                body: JSON.stringify({
+                                    project: targetProject,
+                                    activeProjectId: state.activeProjectId
+                                })
+                            });
+
+                            if (payload && payload.project) {
+                                const projectIndex = state.projects.findIndex(project => project.id === projectId);
+                                if (projectIndex >= 0) {
+                                    state.projects.splice(projectIndex, 1, payload.project);
+                                }
+                            }
+                        }
+                    } else {
+                        const payload = await apiRequest('/modules/sync', {
+                            method: 'POST',
+                            body: JSON.stringify({
+                                projects: state.projects,
+                                folders: state.folders,
+                                activeProjectId: state.activeProjectId
+                            })
+                        });
+
+                        if (payload && Array.isArray(payload.projects)) {
+                            state.projects = payload.projects;
+                            state.folders = Array.isArray(payload.folders) ? normalizeFolderList(payload.folders) : [];
+                            if (!state.projects.some(p => p.id === state.activeProjectId) && state.projects[0]) {
+                                state.activeProjectId = state.projects[0].id;
+                            }
                         }
                     }
                 }
 
                 workspaceHandle = { backend: true };
                 modulesHandle = { backend: true };
+                persistPreferredWorkspaceActiveProjectId(state.activeProjectId);
+                updateLastSyncSignatureFromState();
                 const syncIndicator = document.getElementById('sync-indicator');
                 if (syncIndicator) syncIndicator.style.display = 'flex';
             } catch (err) {
@@ -2909,24 +3266,77 @@
                 if (_syncPending) {
                     _syncPending = false;
                     syncToWorkspace();
+                } else if (_activeProjectSyncPending) {
+                    _activeProjectSyncPending = false;
+                    syncActiveProjectSelection();
                 }
             }
         }
 
-        async function connectWorkspace() {
+        async function connectWorkspace(options = {}) {
+            const { suppressToast = false } = options;
             if (!isServerMode()) {
-                showToast('请通过桌面程序或后端服务启动该页面', 'info');
+                setConnectionOverlayState('idle');
+                if (!suppressToast) showToast('请通过桌面程序或后端服务启动该页面', 'info');
                 return;
             }
 
-            try {
-                await initWorkspace();
-                refreshApp();
-                showToast('后端服务已重新连接', 'success');
-            } catch (err) {
-                console.error(err);
-                showToast('无法连接后端服务: ' + err.message, 'error');
+            if (_connectLock) {
+                return _connectLock;
             }
+
+            const syncIndicator = document.getElementById('sync-indicator');
+            if (syncIndicator) syncIndicator.style.display = 'none';
+            setConnectionOverlayState('connecting');
+
+            _connectLock = (async () => {
+                try {
+                    const workspaceState = await fetchWorkspaceState();
+                    if (workspaceState.sharePayload) {
+                        setShareContext(workspaceState.sharePayload);
+                    } else {
+                        clearShareContext();
+                    }
+
+                    state.projects = workspaceState.projects.length > 0 ? workspaceState.projects : [cloneDefaultTemplate()];
+                    state.folders = Array.isArray(workspaceState.folders) ? workspaceState.folders : [];
+                    syncFolderStateFromProjects();
+                    state.activeProjectId = resolveActiveProjectId(state.projects, workspaceState.activeProjectId);
+                    state.standalone = false;
+                    workspaceHandle = { backend: true };
+                    modulesHandle = { backend: true };
+                    libHandle = { backend: true };
+                    persistPreferredWorkspaceActiveProjectId(state.activeProjectId);
+                    updateLastSyncSignatureFromState();
+
+                    refreshApp();
+                    setConnectionOverlayState('success', `已加载 ${state.projects.length} 个业务模块`);
+                    if (syncIndicator) syncIndicator.style.display = 'flex';
+                    await new Promise(resolve => setTimeout(resolve, 280));
+                    hideConnectionOverlay();
+
+                    if (!suppressToast) {
+                        showToast('后端服务已重新连接', 'success');
+                    }
+                } catch (err) {
+                    console.error(err);
+                    setConnectionOverlayState('error', err.message);
+                    if (!suppressToast) {
+                        showToast('无法连接后端服务: ' + err.message, 'error');
+                    }
+                    throw err;
+                } finally {
+                    _connectLock = null;
+                }
+            })();
+
+            try {
+                await _connectLock;
+            } catch (err) {
+                return;
+            }
+
+            return _connectLock;
         }
 
         async function exportStandalone() {
