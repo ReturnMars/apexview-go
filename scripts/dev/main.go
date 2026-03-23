@@ -1,13 +1,22 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 )
+
+type procResult struct {
+	name string
+	err  error
+}
 
 func main() {
 	projectRoot, err := detectProjectRoot()
@@ -16,9 +25,10 @@ func main() {
 	}
 
 	cacheDirs := map[string]string{
-		"GOCACHE":    filepath.Join(projectRoot, ".cache", "go-build"),
-		"GOMODCACHE": filepath.Join(projectRoot, ".cache", "go-mod"),
-		"GOTMPDIR":   filepath.Join(projectRoot, ".cache", "tmp"),
+		"GOCACHE":          filepath.Join(projectRoot, ".cache", "go-build"),
+		"GOMODCACHE":       filepath.Join(projectRoot, ".cache", "go-mod"),
+		"GOTMPDIR":         filepath.Join(projectRoot, ".cache", "tmp"),
+		"NPM_CONFIG_CACHE": filepath.Join(projectRoot, ".cache", "npm"),
 	}
 	for _, dir := range cacheDirs {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -26,38 +36,120 @@ func main() {
 		}
 	}
 
+	frontendPort, err := findAvailablePort(5173, 20)
+	if err != nil {
+		log.Fatal(err)
+	}
+	frontendURL := fmt.Sprintf("http://127.0.0.1:%d", frontendPort)
+
 	airPath, err := exec.LookPath("air")
 	if err != nil {
 		log.Fatal("air was not found in PATH. Install it with: go install github.com/air-verse/air@latest")
 	}
 
-	env := withEnv(os.Environ(), map[string]string{
-		"GOCACHE":              cacheDirs["GOCACHE"],
-		"GOMODCACHE":           cacheDirs["GOMODCACHE"],
-		"GOTMPDIR":             cacheDirs["GOTMPDIR"],
-		"APEXVIEW_PORT":        "18080",
-		"APEXVIEW_STRICT_PORT": "1",
-		"APEXVIEW_NO_BROWSER":  "1",
+	npmPath, err := exec.LookPath(npmCommand())
+	if err != nil {
+		log.Fatal("npm was not found in PATH. Install Node.js so the Vite frontend can run")
+	}
+
+	backendEnv := withEnv(os.Environ(), map[string]string{
+		"GOCACHE":                   cacheDirs["GOCACHE"],
+		"GOMODCACHE":                cacheDirs["GOMODCACHE"],
+		"GOTMPDIR":                  cacheDirs["GOTMPDIR"],
+		"NPM_CONFIG_CACHE":          cacheDirs["NPM_CONFIG_CACHE"],
+		"APEXVIEW_PORT":             "18080",
+		"APEXVIEW_FRONTEND_DEV_URL": frontendURL,
+		"APEXVIEW_STRICT_PORT":      "1",
+		"APEXVIEW_NO_BROWSER":       "1",
+	})
+	frontendEnv := withEnv(os.Environ(), map[string]string{
+		"NPM_CONFIG_CACHE": cacheDirs["NPM_CONFIG_CACHE"],
 	})
 
-	fmt.Println("ApexView Air dev mode")
-	fmt.Println("App port:   http://127.0.0.1:18080")
-	fmt.Println("Proxy port: http://127.0.0.1:18081")
-	fmt.Println("Hot reload: enabled via Air proxy")
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
 
-	cmd := exec.Command(airPath, "-c", filepath.Join(projectRoot, ".air.toml"))
-	cmd.Dir = projectRoot
-	cmd.Env = env
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	viteCmd := exec.CommandContext(
+		ctx,
+		npmPath,
+		"--prefix",
+		filepath.Join(projectRoot, "frontend"),
+		"run",
+		"dev",
+		"--",
+		"--host",
+		"127.0.0.1",
+		"--port",
+		strconv.Itoa(frontendPort),
+	)
+	viteCmd.Dir = projectRoot
+	viteCmd.Env = frontendEnv
+	viteCmd.Stdout = os.Stdout
+	viteCmd.Stderr = os.Stderr
 
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
-		}
-		log.Fatal(err)
+	airCmd := exec.CommandContext(ctx, airPath, "-c", filepath.Join(projectRoot, ".air.toml"))
+	airCmd.Dir = projectRoot
+	airCmd.Env = backendEnv
+	airCmd.Stdin = os.Stdin
+	airCmd.Stdout = os.Stdout
+	airCmd.Stderr = os.Stderr
+
+	fmt.Println("ApexView dev mode")
+	fmt.Printf("Frontend:      %s\n", frontendURL)
+	fmt.Println("Backend API:   http://127.0.0.1:18080")
+	fmt.Println("Hot reload:    frontend via Vite; backend via Air")
+
+	if err := viteCmd.Start(); err != nil {
+		log.Fatalf("start vite: %v", err)
 	}
+	if err := airCmd.Start(); err != nil {
+		killIfRunning(viteCmd.Process)
+		log.Fatalf("start air: %v", err)
+	}
+
+	results := make(chan procResult, 2)
+	go waitProcess("frontend", viteCmd, results)
+	go waitProcess("backend", airCmd, results)
+
+	first := <-results
+	stop()
+	killIfRunning(viteCmd.Process)
+	killIfRunning(airCmd.Process)
+
+	if ctx.Err() != nil {
+		return
+	}
+	if first.err == nil {
+		return
+	}
+	if exitErr, ok := first.err.(*exec.ExitError); ok {
+		os.Exit(exitErr.ExitCode())
+	}
+	log.Fatalf("%s exited: %v", first.name, first.err)
+}
+
+func waitProcess(name string, cmd *exec.Cmd, results chan<- procResult) {
+	results <- procResult{name: name, err: cmd.Wait()}
+}
+
+func killIfRunning(process *os.Process) {
+	if process == nil {
+		return
+	}
+	_ = process.Kill()
+}
+
+func findAvailablePort(preferred, attempts int) (int, error) {
+	for offset := 0; offset < attempts; offset++ {
+		candidate := preferred + offset
+		listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(candidate)))
+		if err != nil {
+			continue
+		}
+		_ = listener.Close()
+		return candidate, nil
+	}
+	return 0, fmt.Errorf("could not find an available frontend port starting from %d", preferred)
 }
 
 func detectProjectRoot() (string, error) {
@@ -94,4 +186,11 @@ func splitEnv(item string) (string, string, bool) {
 		}
 	}
 	return "", "", false
+}
+
+func npmCommand() string {
+	if runtime.GOOS == "windows" {
+		return "npm.cmd"
+	}
+	return "npm"
 }

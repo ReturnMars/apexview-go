@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
-	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -14,6 +13,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/exec"
@@ -26,15 +26,16 @@ import (
 	"time"
 )
 
-//go:embed web
-var embeddedWeb embed.FS
-
 type app struct {
-	web       fs.FS
-	dataDir   string
-	assetsDir string
-	shareDir  string
-	started   time.Time
+	web             fs.FS
+	dataDir         string
+	assetsDir       string
+	legacyAssetsDir string
+	shareDir        string
+	started         time.Time
+	proxyURL        *url.URL
+	proxy           *httputil.ReverseProxy
+	webSource       string
 }
 
 type modulesPayload struct {
@@ -101,13 +102,25 @@ func main() {
 	mime.AddExtensionType(".json", "application/json; charset=utf-8")
 	mime.AddExtensionType(".ttf", "font/ttf")
 
-	webFS, err := fs.Sub(embeddedWeb, "web")
+	proxyURL, proxy, err := detectFrontendDevProxy()
 	if err != nil {
-		log.Fatalf("load embedded web assets: %v", err)
+		log.Fatalf("configure frontend dev proxy: %v", err)
+	}
+
+	var (
+		webFS     fs.FS
+		webSource string
+	)
+	if proxy == nil {
+		webFS, webSource, err = detectFrontendStaticFS()
+		if err != nil {
+			log.Fatalf("load frontend static assets: %v", err)
+		}
 	}
 
 	dataDir := detectDataDir()
 	assetsDir := detectAssetsDir(dataDir)
+	legacyAssetsDir := detectLegacyAssetsDir(dataDir)
 	shareDir := detectShareDir(dataDir)
 	for _, dir := range []string{dataDir, assetsDir, shareDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -116,11 +129,15 @@ func main() {
 	}
 
 	application := &app{
-		web:       webFS,
-		dataDir:   dataDir,
-		assetsDir: assetsDir,
-		shareDir:  shareDir,
-		started:   time.Now(),
+		web:             webFS,
+		dataDir:         dataDir,
+		assetsDir:       assetsDir,
+		legacyAssetsDir: legacyAssetsDir,
+		shareDir:        shareDir,
+		started:         time.Now(),
+		proxyURL:        proxyURL,
+		proxy:           proxy,
+		webSource:       webSource,
 	}
 
 	mux := http.NewServeMux()
@@ -133,7 +150,8 @@ func main() {
 	mux.HandleFunc("/api/modules/sync", application.handleModulesSync)
 	mux.HandleFunc("/api/shares", application.handleShares)
 	mux.HandleFunc("/api/shares/", application.handleShareByID)
-	mux.HandleFunc("/assets/", application.handleAssetStatic)
+	mux.HandleFunc("/assets/", application.handleFrontendOrLegacyAssetStatic)
+	mux.HandleFunc("/uploads/", application.handleAssetStatic)
 	mux.HandleFunc("/", application.handleStatic)
 
 	listener := mustListen()
@@ -147,8 +165,16 @@ func main() {
 
 	log.Printf("%s %s started", appName, appVersion)
 	log.Printf("data dir: %s", dataDir)
-	log.Printf("assets dir: %s", assetsDir)
+	log.Printf("uploads dir: %s", assetsDir)
+	if legacyAssetsDir != assetsDir {
+		log.Printf("legacy assets dir: %s", legacyAssetsDir)
+	}
 	log.Printf("share dir: %s", shareDir)
+	if proxyURL != nil {
+		log.Printf("frontend dev proxy: %s", proxyURL.String())
+	} else if webSource != "" {
+		log.Printf("frontend static source: %s", webSource)
+	}
 	for _, item := range urls {
 		log.Printf("open: %s", item)
 	}
@@ -198,6 +224,10 @@ func detectShareDir(dataDir string) string {
 }
 
 func detectAssetsDir(dataDir string) string {
+	return filepath.Join(filepath.Dir(dataDir), "uploads")
+}
+
+func detectLegacyAssetsDir(dataDir string) string {
 	return filepath.Join(filepath.Dir(dataDir), "assets")
 }
 
@@ -215,6 +245,68 @@ func parsePort() int {
 	return value
 }
 
+func detectFrontendDevProxy() (*url.URL, *httputil.ReverseProxy, error) {
+	raw := strings.TrimSpace(os.Getenv("APEXVIEW_FRONTEND_DEV_URL"))
+	if raw == "" {
+		return nil, nil, nil
+	}
+
+	target, err := url.Parse(raw)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse APEXVIEW_FRONTEND_DEV_URL: %w", err)
+	}
+	if target.Scheme != "http" && target.Scheme != "https" {
+		return nil, nil, fmt.Errorf("APEXVIEW_FRONTEND_DEV_URL must start with http:// or https://")
+	}
+	if strings.TrimSpace(target.Host) == "" {
+		return nil, nil, fmt.Errorf("APEXVIEW_FRONTEND_DEV_URL must include a host")
+	}
+
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, proxyErr error) {
+		log.Printf("frontend dev proxy error: %v", proxyErr)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = fmt.Fprintf(
+			w,
+			`<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>Frontend Dev Server Unavailable</title><style>body{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6f9;color:#1d2129;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:24px}.card{max-width:640px;background:#fff;border:1px solid #e5e6eb;border-radius:16px;box-shadow:0 12px 32px rgba(0,0,0,.08);padding:28px 32px}h1{margin:0 0 12px;font-size:24px}p{margin:0 0 12px;line-height:1.7}code{background:#f6f8fa;padding:2px 6px;border-radius:6px}</style></head><body><div class="card"><h1>前端开发服务未启动</h1><p>后端已切换到前后端分离开发模式，不再提供 <code>src/web</code> 旧前端页面。</p><p>请先启动 Vite 前端服务，然后刷新当前页面：</p><p><code>%s</code></p><p>代理错误：%s</p></div></body></html>`,
+			target.String(),
+			proxyErr,
+		)
+	}
+	return target, proxy, nil
+}
+
+func detectFrontendStaticFS() (fs.FS, string, error) {
+	workingDir, _ := os.Getwd()
+	exePath, _ := os.Executable()
+	exeDir := filepath.Dir(exePath)
+
+	candidates := []string{
+		filepath.Join(workingDir, "frontend", "dist"),
+		filepath.Join(exeDir, "frontend", "dist"),
+		filepath.Join(exeDir, "..", "Resources", "frontend", "dist"),
+	}
+	for _, candidate := range candidates {
+		if !isFrontendDistDir(candidate) {
+			continue
+		}
+		return os.DirFS(candidate), candidate, nil
+	}
+
+	return nil, "", fmt.Errorf("frontend dist not found; run npm --prefix frontend run build or start the Vite dev server")
+}
+
+func isFrontendDistDir(dir string) bool {
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	indexPath := filepath.Join(dir, "index.html")
+	indexInfo, err := os.Stat(indexPath)
+	return err == nil && !indexInfo.IsDir()
+}
+
 func envEnabled(name string) bool {
 	raw := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
 	return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
@@ -223,19 +315,10 @@ func envEnabled(name string) bool {
 func mustListen() net.Listener {
 	preferred := parsePort()
 	listener, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", preferred))
-	if err == nil {
-		return listener
-	}
-	if envEnabled("APEXVIEW_STRICT_PORT") {
+	if err != nil {
 		log.Fatalf("listen %d: %v", preferred, err)
 	}
-
-	fallback, fallbackErr := net.Listen("tcp", "0.0.0.0:0")
-	if fallbackErr != nil {
-		log.Fatalf("listen: %v / fallback: %v", err, fallbackErr)
-	}
-
-	return fallback
+	return listener
 }
 
 func shouldOpenBrowser() bool {
@@ -726,6 +809,10 @@ func (a *app) handleStatic(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	if a.proxy != nil {
+		a.proxy.ServeHTTP(w, r)
+		return
+	}
 
 	requested := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
 	if requested == "" || requested == "." {
@@ -757,7 +844,7 @@ func (a *app) handleStatic(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, normalizedPath, time.Time{}, bytes.NewReader(data))
 }
 
-func (a *app) handleAssetStatic(w http.ResponseWriter, r *http.Request) {
+func (a *app) handleFrontendOrLegacyAssetStatic(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		methodNotAllowed(w)
 		return
@@ -769,13 +856,46 @@ func (a *app) handleAssetStatic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if a.web != nil {
+		if data, err := fs.ReadFile(a.web, requested); err == nil {
+			w.Header().Set("Content-Type", contentTypeFor(requested))
+			http.ServeContent(w, r, path.Base(requested), time.Time{}, bytes.NewReader(data))
+			return
+		}
+	}
+
 	relative, err := normalizeAssetRelativePath(strings.TrimPrefix(requested, "assets/"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 
-	targetPath := filepath.Join(a.assetsDir, filepath.FromSlash(relative))
+	a.serveAssetFile(w, r, a.legacyAssetsDir, relative)
+}
+
+func (a *app) handleAssetStatic(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		methodNotAllowed(w)
+		return
+	}
+
+	requested := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+	if !strings.HasPrefix(requested, "uploads/") {
+		http.NotFound(w, r)
+		return
+	}
+
+	relative, err := normalizeAssetRelativePath(strings.TrimPrefix(requested, "uploads/"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	a.serveAssetFile(w, r, a.assetsDir, relative)
+}
+
+func (a *app) serveAssetFile(w http.ResponseWriter, r *http.Request, baseDir, relative string) {
+	targetPath := filepath.Join(baseDir, filepath.FromSlash(relative))
 	file, err := os.Open(targetPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1031,7 +1151,7 @@ func (a *app) saveUploadedAsset(file multipart.File, header *multipart.FileHeade
 		return "", fmt.Errorf("replace uploaded asset: %w", err)
 	}
 
-	return "/assets/" + relativePath, nil
+	return "/uploads/" + relativePath, nil
 }
 
 func (a *app) createShare(project map[string]any) (shareRecord, map[string]any, error) {

@@ -6,16 +6,17 @@ cmd = "go build -trimpath -o ./tmp/ApexView-dev.exe ./src"
 bin = "tmp/ApexView-dev.exe"
 entrypoint = ["./tmp/ApexView-dev.exe"]
 include_dir = ["src"]
-include_ext = ["go", "html", "css", "js", "json", "ttf", "svg"]
-exclude_dir = [".git", ".cache", "dist", "tmp", "modules", "shares", "demo"]
+include_ext = ["go"]
+exclude_dir = [".git", ".cache", "dist", "tmp", "modules", "shares", "demo", "frontend", "scripts"]
 exclude_regex = ["_test\\.go"]
 delay = 300
 stop_on_error = true
 
 [proxy]
-enabled = true
+enabled = false
 proxy_port = 18081
 app_port = 18080
 
 [screen]
 clear_on_rebuild = true
+

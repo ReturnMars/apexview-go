@@ -25,6 +25,8 @@ func main() {
 	projectRoot, err := detectProjectRoot()
 	must(err)
 
+	must(buildFrontend(projectRoot))
+
 	distDir := filepath.Join(projectRoot, "dist")
 	must(os.MkdirAll(distDir, 0o755))
 
@@ -91,6 +93,39 @@ func prepareStageDir(projectRoot string, item target) (string, error) {
 	return stageDir, nil
 }
 
+func buildFrontend(projectRoot string) error {
+	cacheDir := filepath.Join(projectRoot, ".cache", "npm")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return err
+	}
+
+	frontendDir := filepath.Join(projectRoot, "frontend")
+	fmt.Println("building frontend")
+	command := exec.Command(npmCommand(), "run", "build")
+	command.Dir = frontendDir
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	command.Env = append(os.Environ(), "NPM_CONFIG_CACHE="+cacheDir)
+	if err := command.Run(); err != nil {
+		return err
+	}
+
+	if !isFrontendDistDir(filepath.Join(frontendDir, "dist")) {
+		return fmt.Errorf("frontend build completed but dist directory is missing")
+	}
+	return nil
+}
+
+func isFrontendDistDir(dir string) bool {
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	indexPath := filepath.Join(dir, "index.html")
+	indexInfo, err := os.Stat(indexPath)
+	return err == nil && !indexInfo.IsDir()
+}
+
 func buildTarget(projectRoot, stageDir, distDir string, item target) error {
 	bundleRoot := filepath.Join(stageDir, item.Bundle)
 	if err := os.MkdirAll(bundleRoot, 0o755); err != nil {
@@ -104,6 +139,9 @@ func buildTarget(projectRoot, stageDir, distDir string, item target) error {
 			return err
 		}
 		if err := copyDir(filepath.Join(projectRoot, "modules"), filepath.Join(bundleRoot, "data", "modules")); err != nil {
+			return err
+		}
+		if err := copyFrontendDist(projectRoot, filepath.Join(bundleRoot, "frontend", "dist")); err != nil {
 			return err
 		}
 		launcher := "@echo off\r\ncd /d %~dp0\r\nstart \"\" \"%~dp0ApexView.exe\"\r\n"
@@ -133,6 +171,9 @@ func buildTarget(projectRoot, stageDir, distDir string, item target) error {
 		if err := copyDir(filepath.Join(projectRoot, "modules"), filepath.Join(resourcesDir, "data", "modules")); err != nil {
 			return err
 		}
+		if err := copyFrontendDist(projectRoot, filepath.Join(resourcesDir, "frontend", "dist")); err != nil {
+			return err
+		}
 		if err := os.WriteFile(filepath.Join(appRoot, "Contents", "Info.plist"), []byte(macInfoPlist()), 0o644); err != nil {
 			return err
 		}
@@ -150,6 +191,10 @@ func buildTarget(projectRoot, stageDir, distDir string, item target) error {
 		fmt.Fprintf(os.Stderr, "warning: publish %s: %v\n", item.Bundle, err)
 	}
 	return nil
+}
+
+func copyFrontendDist(projectRoot, destination string) error {
+	return copyDir(filepath.Join(projectRoot, "frontend", "dist"), destination)
 }
 
 func publishBundleDir(source, destination string) error {
@@ -361,8 +406,9 @@ func windowsReadme() string {
 1. 双击 启动ApexView.bat。
 2. 程序会自动启动本地服务并打开浏览器。
 3. 模块 JSON 数据位于 data\\modules，分享元数据会写入 data\\shares。
-4. 生成分享链接后，对方只能操作当前分享模块，保存会直接写回同一个源 JSON。
-5. 若要让同局域网其他人访问，请允许系统防火墙放行，并把程序生成的分享链接发给对方。`) + "\n"
+4. 前端静态资源位于 frontend\\dist，请勿删除。
+5. 生成分享链接后，对方只能操作当前分享模块，保存会直接写回同一个源 JSON。
+6. 若要让同局域网其他人访问，请允许系统防火墙放行，并把程序生成的分享链接发给对方。`) + "\n"
 }
 
 func macReadme(arch string) string {
@@ -371,8 +417,9 @@ func macReadme(arch string) string {
 1. 解压 tar.gz 后双击 ApexView.app。
 2. 首次打开如果被系统拦截，请右键应用并选择“打开”。
 3. 模块 JSON 数据位于 ApexView.app/Contents/Resources/data/modules，分享元数据位于同级 data/shares。
-4. 生成分享链接后，对方只能操作当前分享模块，保存会直接写回同一个源 JSON。
-5. 程序启动后会自动打开浏览器。`, arch)) + "\n"
+4. 前端静态资源位于 ApexView.app/Contents/Resources/frontend/dist，请勿删除。
+5. 生成分享链接后，对方只能操作当前分享模块，保存会直接写回同一个源 JSON。
+6. 程序启动后会自动打开浏览器。`, arch)) + "\n"
 }
 
 func macInfoPlist() string {
@@ -402,6 +449,13 @@ func macInfoPlist() string {
     <string>11.0</string>
 </dict>
 </plist>`) + "\n"
+}
+
+func npmCommand() string {
+	if runtime.GOOS == "windows" {
+		return "npm.cmd"
+	}
+	return "npm"
 }
 
 func must(err error) {

@@ -1,10 +1,15 @@
 {
-  "id": "p1773759680577",
-  "name": "采购订单",
-  "code": "graph TD\n    Start[\"开始\"] --> End[\"结束\"]",
-  "mappings": {},
-  "remarks": {},
+  "code": "graph TD\n    Start[\"开始\"] --\u003e End[\"结束\"]",
   "dataSources": {},
+  "downstream": {},
+  "id": "p1773759680577",
+  "mappings": {
+    "Start": [
+      "http://127.0.0.1:5173/assets/p1773759680577/start-20260323-160934-7fb18cee.png"
+    ]
+  },
+  "name": "采购订单",
   "outputs": {},
-  "downstream": {}
+  "remarks": {},
+  "severeBlockers": {}
 }

@@ -1,10 +1,10 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`src/main.go` is the Go server entrypoint; it embeds and serves `src/web/`, exposes `/api/modules` and `/api/shares`, and writes runtime data under `modules/` and `shares/`. `scripts/build.go` creates Windows and macOS deliverables in `dist/`. Treat `modules/` as the source-of-truth business data directory. Do not hand-edit `dist/`, `.cache/`, or runtime-generated `shares/`.
+`src/main.go` is the Go backend entrypoint. It serves `/api/modules`, `/api/shares`, frontend bundle files under `/assets/*`, and uploaded business images under `/uploads/*`, proxies Vite in development, and loads packaged frontend files from `frontend/dist` at runtime. Put all UI work in `frontend/` (Vite + React). The old `src/web/` frontend has been removed and is no longer part of the repo. Business data lives under `modules/`; share metadata is written to `shares/`; uploaded images are stored in `uploads/`.
 
 ## Build, Test, and Development Commands
-Use repo-local caches in this workspace to avoid permission issues:
+Use repo-local caches to avoid permission issues:
 
 ```powershell
 $env:GOCACHE="$PWD/.cache/go-build"
@@ -12,16 +12,18 @@ $env:GOMODCACHE="$PWD/.cache/go-mod"
 $env:GOTMPDIR="$PWD/.cache/tmp"
 ```
 
-For hot-reload development, run `go run ./scripts/dev` and open `http://127.0.0.1:18081`. Run the app manually with `go build -trimpath -o dist/ApexView-dev.exe ./src`, then launch `dist/ApexView-dev.exe`. Validate code with `go test ./...`. Build release bundles with `go run ./scripts/build.go`; this generates `dist/ApexView-win-amd64/`, `dist/ApexView-win-amd64.zip`, `dist/ApexView-macos-arm64/`, and `dist/ApexView-macos-arm64.tar.gz`.
+Install frontend deps with `npm --prefix frontend install` and Air with `go install github.com/air-verse/air@latest`. Run `go run ./scripts/dev` to start both Vite (`5173`) and Air-backed Go (`18080`). For a local binary, run `npm --prefix frontend run build` and then `go build -trimpath -o dist/ApexView-dev.exe ./src`. Release packaging is `go run ./scripts/build.go`; it builds the React frontend first, then creates Windows and macOS bundles in `dist/`.
 
 ## Coding Style & Naming Conventions
-Follow standard Go formatting: run `gofmt -w` on changed `.go` files and keep package-level identifiers in mixedCase/UpperCamelCase as shown in `src/main.go`. Keep handlers and helpers small and explicit. In `src/web/index.html`, preserve the existing 4-space indentation and descriptive DOM/CSS names. Persisted JSON files are pretty-printed with 2-space indentation and a trailing newline; keep that format for module or share fixtures.
+Run `gofmt -w` on changed Go files. Keep handlers explicit and small. New frontend code belongs in `frontend/src/` and should follow the current TypeScript/React component split (`components/workspace`, `services`, `types`, `styles`). Preserve the existing workspace UI and behavior during migration; avoid opportunistic redesigns. Persisted JSON should remain pretty-printed with 2-space indentation and a trailing newline.
 
 ## Testing Guidelines
-There are currently no committed `*_test.go` files, so `go test ./...` is a smoke check. Add new tests beside the code they cover, use Go’s standard `testing` package, and prefer table-driven tests for path normalization, share ID validation, and module file handling. Include at least one local manual verification note for UI or share-flow changes.
+`go test ./...` is currently a smoke check. Validate frontend changes with `npm --prefix frontend run build`. Add Go tests beside the code they cover, prefer table-driven cases for path normalization, share ID validation, and module file handling, and include at least one manual verification note for UI, share-flow, or asset-upload changes.
 
 ## Commit & Pull Request Guidelines
-Recent history favors short imperative subjects and scoped Conventional Commits, for example `feat(module, ui): ...`. Prefer that format over vague messages. In pull requests, summarize user-visible behavior, list commands you ran (`go test ./...`, build, manual share-flow check), and attach screenshots when `src/web/index.html` changes. Call out any edits to `modules/` sample data explicitly.
+Recent history favors short imperative subjects and scoped Conventional Commits such as `feat(module, ui): ...`. In pull requests, summarize user-visible behavior, list commands run (`go test ./...`, `npm --prefix frontend run build`, packaging if relevant), and attach screenshots for frontend changes. Call out any edits to sample `modules/` data explicitly.
 
 ## Configuration & Data Safety
-`APEXVIEW_PORT` overrides the default `18080` port. `APEXVIEW_MODULES_DIR` points the app at an alternate module store. `APEXVIEW_NO_BROWSER=1` disables automatic browser launch. Share saves write back to the original module JSON, so verify data paths before testing against real content.
+`APEXVIEW_PORT` overrides the default fixed port `18080`. If that port is unavailable, the app now exits instead of falling back to a random port. `APEXVIEW_MODULES_DIR` points to an alternate module store. `APEXVIEW_NO_BROWSER=1` disables automatic browser launch. Share saves write directly back to the source module JSON, so confirm your data path before testing against real content.
+
+
