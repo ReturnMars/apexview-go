@@ -2,5 +2,7 @@
 dist/
 shares/
 tmp/
+.vite/
+modules/
 .DS_Store
 Thumbs.db
